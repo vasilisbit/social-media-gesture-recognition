@@ -1,11 +1,31 @@
 from os import listdir
 from os.path import isfile, join
+import secrets
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Iterator
+
 import scipy
 import pandas as pd
 import numpy as np
 from sklearn import preprocessing
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pymongo import ASCENDING, MongoClient
+from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
+
+VALID_BASES = {"scroll-up", "scroll-down", "swipe-left", "swipe-right", "texting"}
+VALID_USERS = {"a", "b", "s"}
+VALID_SENSORS_PER_FILE = {"acc", "gyr"}
+VARIANT_TO_FINGER_STYLE = {
+    "thumb":  ("thumb", "na"),
+    "index":  ("index", "na"),
+    "two":    ("na",    "two_handed"),
+    "single": ("na",    "single_handed"),
+}
+SIX_AXES = ("acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z")
 
 
 def sliding_window_pd(
@@ -234,3 +254,190 @@ def list_files_in_folder(folder_path) -> list:
                 files_list.append(f)
 
     return files_list
+
+
+# -------------------------------------------------------------------------- #
+# Raw CSV → merged 6-axis MongoDB documents (functional)
+# -------------------------------------------------------------------------- #
+
+def parse_filename(name: str) -> dict:
+    """Parses a raw session CSV filename into metadata fields.
+
+    Expected format (7 underscore-separated tokens):
+        {base}_{variant}_{hand}_{sr}_{sensor}_{primary}_{user}.csv
+
+    Args:
+        name: CSV filename or path.
+
+    Returns:
+        Dict with gesture_id, finger, typing_style, hand, sr, sensor (acc|gyr),
+        primary, user. The runtime fields `session_id`, `spontaneous` and the
+        merged `sensor="AccGyr"` are filled by `build_document`.
+
+    Raises:
+        ValueError: If the filename does not match the expected format.
+    """
+    stem = Path(name).stem
+    parts = stem.split("_")
+    if len(parts) != 7:
+        raise ValueError(f"Bad filename {name!r}: expected 7 tokens, got {len(parts)}")
+    base, variant, hand, sr, sensor, primary, user = parts
+    if base not in VALID_BASES:
+        raise ValueError(f"Bad base in {name!r}: {base!r}")
+    if variant not in VARIANT_TO_FINGER_STYLE:
+        raise ValueError(f"Bad variant in {name!r}: {variant!r}")
+    if base == "texting" and variant not in {"two", "single"}:
+        raise ValueError(f"texting requires two/single, got {variant!r}")
+    if base != "texting" and variant not in {"thumb", "index"}:
+        raise ValueError(f"{base} requires thumb/index, got {variant!r}")
+    if sensor not in VALID_SENSORS_PER_FILE:
+        raise ValueError(f"Bad sensor in {name!r}: {sensor!r}")
+    if user not in VALID_USERS:
+        raise ValueError(f"Bad user in {name!r}: {user!r}")
+    finger, typing_style = VARIANT_TO_FINGER_STYLE[variant]
+    return {
+        "gesture_id":   base,
+        "finger":       finger,
+        "typing_style": typing_style,
+        "hand":         int(hand),
+        "sr":           int(sr),
+        "sensor":       sensor,
+        "primary":      int(primary),
+        "user":         user,
+    }
+
+
+def session_key(meta: dict) -> tuple:
+    """Returns the pairing key (everything except `sensor`)."""
+    return (meta["gesture_id"], meta["finger"], meta["typing_style"],
+            meta["hand"], meta["primary"], meta["user"])
+
+
+def discover_csvs(data_root) -> list:
+    """Returns every CSV under data_root, recursively, sorted."""
+    return sorted(Path(data_root).rglob("*.csv"))
+
+
+def pair_acc_gyr(csv_paths: Iterable) -> Iterator:
+    """Pairs acc/gyr files that share the same session key.
+
+    Args:
+        csv_paths: Iterable of CSV paths.
+
+    Yields:
+        (shared_meta, acc_path, gyr_path) for each complete pair. Files with
+        an unparseable name or no counterpart are skipped with a warning.
+    """
+    by_key: dict = defaultdict(dict)
+    for path in csv_paths:
+        try:
+            meta = parse_filename(Path(path).name)
+        except ValueError as exc:
+            print(f"SKIP {Path(path).name}: {exc}")
+            continue
+        by_key[session_key(meta)][meta["sensor"]] = (Path(path), meta)
+
+    for key, sensors in by_key.items():
+        missing = {"acc", "gyr"} - sensors.keys()
+        if missing:
+            print(f"SKIP {key}: missing {missing}")
+            continue
+        acc_path, acc_meta = sensors["acc"]
+        gyr_path, _        = sensors["gyr"]
+        shared = {k: v for k, v in acc_meta.items() if k != "sensor"}
+        yield shared, acc_path, gyr_path
+
+
+def load_acc_csv(path) -> pd.DataFrame:
+    """Loads a raw accelerometer CSV (Epoch,X,Y,Z) and renames axes to acc_*."""
+    return (pd.read_csv(path)
+              .rename(columns={"X": "acc_x", "Y": "acc_y", "Z": "acc_z"})
+              .sort_values("Epoch")
+              .reset_index(drop=True))
+
+
+def load_gyr_csv(path) -> pd.DataFrame:
+    """Loads a raw gyroscope CSV (Epoch,X,Y,Z) and renames axes to gyr_*."""
+    return (pd.read_csv(path)
+              .rename(columns={"X": "gyr_x", "Y": "gyr_y", "Z": "gyr_z"})
+              .sort_values("Epoch")
+              .reset_index(drop=True))
+
+
+def merge_acc_gyr(acc_df: pd.DataFrame, gyr_df: pd.DataFrame,
+                  tolerance_ms: int = 10) -> pd.DataFrame:
+    """Aligns acc/gyr by Epoch with merge_asof; drops rows missing any axis."""
+    merged = pd.merge_asof(acc_df, gyr_df, on="Epoch",
+                            direction="nearest", tolerance=tolerance_ms)
+    return (merged
+              .dropna(subset=list(SIX_AXES))
+              .reset_index(drop=True))
+
+
+def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
+                              wn: float = 0.2) -> pd.DataFrame:
+    """Zero-phase Butterworth lowpass on the 6 axes (D5).
+
+    Args:
+        df: DataFrame containing the SIX_AXES columns.
+        order: Butterworth order. Defaults to 4.
+        wn: Normalized critical frequency 2*fc/fs. fc=10Hz @ fs=100Hz → 0.2.
+
+    Returns:
+        A copy of df with the 6 axes filtered. Other columns are preserved.
+    """
+    sos = scipy.signal.butter(order, wn, btype="lowpass", output="sos")
+    out = df.copy()
+    for col in SIX_AXES:
+        out[col] = scipy.signal.sosfiltfilt(sos, df[col].values, padlen=0)
+    return out
+
+
+def load_session(acc_path, gyr_path) -> pd.DataFrame:
+    """Loads, merges and lowpass-filters one acc/gyr pair into a 6-axis frame."""
+    return apply_continuous_filter(
+        merge_acc_gyr(load_acc_csv(acc_path), load_gyr_csv(gyr_path))
+    )
+
+
+def build_document(df: pd.DataFrame, meta: dict) -> dict:
+    """Builds the MongoDB document from a 6-axis DataFrame and shared metadata."""
+    return {
+        "session_id":   secrets.token_hex(12),
+        "data":         {col: df[col].tolist() for col in SIX_AXES},
+        "gesture_id":   meta["gesture_id"],
+        "finger":       meta["finger"],
+        "typing_style": meta["typing_style"],
+        "hand":         meta["hand"],
+        "sr":           meta["sr"],
+        "sensor":       "AccGyr",
+        "primary":      meta["primary"],
+        "spontaneous":  0,
+        "user":         meta["user"],
+        "datetime":     datetime.now(timezone.utc),
+    }
+
+
+def mongo_connect(uri: str = "mongodb://localhost:27017/",
+                   db: str = "aiot_gestures",
+                   collection: str = "sessions",
+                   reset: bool = False) -> Collection:
+    """Returns a MongoDB collection handle, optionally clearing existing docs."""
+    coll = MongoClient(uri)[db][collection]
+    if reset:
+        coll.delete_many({})
+    coll.create_index([("session_id", ASCENDING)], unique=True)
+    return coll
+
+
+def insert_documents(coll: Collection, docs: Iterable) -> int:
+    """Inserts each document; returns the number successfully inserted."""
+    inserted = 0
+    for doc in docs:
+        try:
+            coll.insert_one(doc)
+            inserted += 1
+        except DuplicateKeyError as exc:
+            tag = f"{doc.get('user')}/{doc.get('gesture_id')}/{doc.get('finger')}"
+            print(f"SKIP insert ({tag}): duplicate session_id ({exc})")
+    return inserted

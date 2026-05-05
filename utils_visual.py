@@ -1,8 +1,15 @@
+from pathlib import Path
+from typing import Iterable
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+
+AXIS_COLORS = {"x": "#d62728", "y": "#2ca02c", "z": "#1f77b4"}
+ACC_COLS = ("acc_x", "acc_y", "acc_z")
+GYR_COLS = ("gyr_x", "gyr_y", "gyr_z")
 
 
 def plot_instance_time_domain(df: pd.DataFrame):
@@ -118,3 +125,93 @@ def plot_scatter_pca(
         ax.set_zlabel('Third Principal Component')
     else:
         print("The DataFrame has more than 4 columns.")
+
+
+# -------------------------------------------------------------------------- #
+# Static PNG visualizations for full merged sessions
+# -------------------------------------------------------------------------- #
+
+def session_label(meta: dict) -> str:
+    """Builds a short human-readable label, e.g. 'scroll-up | thumb | user=a'."""
+    parts = [meta["gesture_id"], meta["finger"], meta["typing_style"], f"user={meta['user']}"]
+    return " | ".join(p for p in parts if p != "na")
+
+
+def session_slug(meta: dict) -> str:
+    """Builds a filesystem-safe slug for a session."""
+    return (f"{meta['gesture_id']}_{meta['finger']}_{meta['typing_style']}"
+            f"_h{meta['hand']}_p{meta['primary']}_sr{meta['sr']}_{meta['user']}")
+
+
+def _time_axis(df: pd.DataFrame, sr: int) -> pd.Series:
+    """Returns time in seconds. Uses Epoch if present, else sample index / sr."""
+    if "Epoch" in df.columns and len(df) > 0:
+        return (df["Epoch"] - df["Epoch"].iloc[0]) / 1000.0
+    return pd.Series(df.index / sr)
+
+
+def plot_session_timeseries(df: pd.DataFrame, meta: dict, out_dir) -> Path:
+    """Saves a 2x3 grid of time-domain plots for the 6 axes of a session."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(2, 3, figsize=(13, 6), sharex=True)
+    t = _time_axis(df, meta["sr"])
+    rows = [(ACC_COLS, "Accelerometer (g)"),
+            (GYR_COLS, "Gyroscope (deg/s)")]
+    for row_i, (cols, ylabel) in enumerate(rows):
+        for col_i, col in enumerate(cols):
+            ax = axes[row_i, col_i]
+            ax.plot(t, df[col], color=AXIS_COLORS[col[-1]], linewidth=0.6)
+            ax.set_title(col)
+            ax.grid(alpha=0.3)
+            if col_i == 0:
+                ax.set_ylabel(ylabel)
+    for ax in axes[1]:
+        ax.set_xlabel("Time (s)")
+    fig.suptitle(f"6-axis time domain — {session_label(meta)}", fontsize=12)
+    fig.tight_layout()
+    out = out_dir / f"timeseries_{session_slug(meta)}.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def plot_session_3d(df: pd.DataFrame, meta: dict, out_dir) -> Path:
+    """Saves side-by-side static 3D scatters for acc and gyr of a session."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(12, 5))
+    panels = [("Accelerometer", ACC_COLS),
+              ("Gyroscope",     GYR_COLS)]
+    for i, (sensor_name, cols) in enumerate(panels):
+        ax = fig.add_subplot(1, 2, i + 1, projection="3d")
+        ax.scatter(df[cols[0]], df[cols[1]], df[cols[2]],
+                    c=df.index, cmap="viridis", s=2, alpha=0.6)
+        ax.set_title(sensor_name)
+        ax.set_xlabel(cols[0])
+        ax.set_ylabel(cols[1])
+        ax.set_zlabel(cols[2])
+    fig.suptitle(f"3D trajectory — {session_label(meta)}", fontsize=12)
+    fig.tight_layout()
+    out = out_dir / f"scatter3d_{session_slug(meta)}.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def visualize_session(df: pd.DataFrame, meta: dict, out_dir):
+    """Saves both time-domain and 3D-scatter plots for a single session."""
+    return plot_session_timeseries(df, meta, out_dir), plot_session_3d(df, meta, out_dir)
+
+
+def visualize_all(sessions: Iterable, out_dir) -> int:
+    """Runs visualize_session for every (df, meta); returns the count visualized."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for df, meta in sessions:
+        visualize_session(df, meta, out_dir)
+        count += 1
+    return count
