@@ -17,9 +17,8 @@ rename: ["acc_x", "acc_y", "acc_z"]
 
 #--------------------- Dataset Local Storage ----------------------
 # dataset location
-data_path: "PATH TO THE DATASET"
-# single data instance location path to experiment with the data engineering process and visualization
-single_instance_path: "PATH TO INSTANCE"
+data_path: "data_sync"
+single_instance_path: "data/sample.csv"
 
 
 #--------------------- Data Engineering ----------------------
