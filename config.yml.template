@@ -1,12 +1,8 @@
 #--------------------- DB ----------------------
-# DB Connection with the uri (host)
-client: "INSERT THE HOST"
-
-# db name
-db: "NAME YOUR DB"
-
-# db collection
-col: "NAME YOUR COLLECTION"
+# DB Connection with the uri (host) its best to be the same  for all
+client: "mongodb://localhost:27017/"
+db: "aiot_gestures"
+col: "sessions"
 
 
 #--------------------- Dataframe Instantiation ----------------------
