@@ -348,7 +348,6 @@ def pair_acc_gyr(csv_paths: Iterable) -> Iterator:
         shared = {k: v for k, v in acc_meta.items() if k != "sensor"}
         yield shared, acc_path, gyr_path
 
-# σε καποιο αρχειο υπαχει περιεργος χαρακτηρας
 def load_acc_csv(path) -> pd.DataFrame:
     """Loads a raw accelerometer CSV (Epoch,X,Y,Z) and renames axes to acc_*."""
     return (pd.read_csv(path, encoding='utf-8-sig', engine='python')
@@ -374,7 +373,6 @@ def merge_acc_gyr(acc_df: pd.DataFrame, gyr_df: pd.DataFrame,
               .dropna(subset=list(SIX_AXES))
               .reset_index(drop=True))
 
-# Διωρθωμενη ΣΟΣ καθαριζει τα αρχεια απο περιεργουσ χαρακτηρες
 def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
                               wn: float = 0.2) -> pd.DataFrame:
     """Zero-phase Butterworth lowpass on the 6 axes (D5).
@@ -389,7 +387,8 @@ def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
     """
     b, a = butter(order, wn, btype="lowpass", output="ba")
     out = df.copy()
-#καθαρισμα δεδομενων
+
+    # Removing non-float characters and applying filtfilt with padlen=0 to avoid edge artifacts.
     for col in SIX_AXES:
         clean_col = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
         data = pd.to_numeric(clean_col, errors='coerce').values
