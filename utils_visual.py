@@ -336,8 +336,6 @@ def plot_session_acc_3axis(df: pd.DataFrame, meta: dict, out_dir, name_suffix: s
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out
-
-
 def plot_session_gyr_3axis(df: pd.DataFrame, meta: dict, out_dir,
                            smooth_window: int = 15, name_suffix: str = "") -> Path:
     """Three stacked subplots (one per gyroscope axis) sharing the time axis.
@@ -365,8 +363,6 @@ def plot_session_gyr_3axis(df: pd.DataFrame, meta: dict, out_dir,
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out
-
-
 def plot_session_6axis(df: pd.DataFrame, meta: dict, out_dir, name_suffix: str = "") -> Path:
     """Combined 6-axis view: acc and gyr stacked, sharing the time axis."""
     out_dir = Path(out_dir)
@@ -393,17 +389,17 @@ def plot_session_6axis(df: pd.DataFrame, meta: dict, out_dir, name_suffix: str =
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out
-
-
 def visualize_session_overlays(df: pd.DataFrame, meta: dict, out_dir):
     """Convenience wrapper that saves all three overlay plots for a session."""
     return (plot_session_acc_3axis(df, meta, out_dir),
             plot_session_gyr_3axis(df, meta, out_dir),
             plot_session_6axis(df, meta, out_dir))
 
+
+
 #------------------------------Our Implementation-----------------------------------------#
 
-# Plot Window to visualize The data for Each User
+# Plot 3 axis Window to visualize The data for Each User
 def plot(ax, df, sensor, user_name, hand):
     if not df.empty:
         df_plot = df.copy()
@@ -416,6 +412,9 @@ def plot(ax, df, sensor, user_name, hand):
         ax.plot(df_plot.index, df_plot[f'{sensor}_y'], label='Y', color='green', lw=1)
         ax.plot(df_plot.index, df_plot[f'{sensor}_z'], label='Z', color='blue', lw=1)
 
+
+        ax.legend(loc='upper right', fontsize='small', framealpha=0.5)
+
     if hand == 0:
         ax.set_xlabel("Sample Thumb")
     else:
@@ -423,12 +422,10 @@ def plot(ax, df, sensor, user_name, hand):
 
     ax.set_title(f"{user_name} | {sensor.upper()}")
     ax.grid(True, alpha=0.2)
-
-
 def Plot_3axis_window2(all_users_dicts, gesture, limit=128):
 
     fig, axes = plt.subplots(4, 3, figsize=(20, 18))
-    fig.suptitle(f"6-Axis Analysis (Thumb vs Index): {gesture}", fontsize=20, fontweight='bold')
+    fig.suptitle(f"3-Axis Analysis (Thumb vs Index): {gesture}", fontsize=20, fontweight='bold')
 
     user_names = ['Vasilis', 'Stamy', 'Alex']
 
@@ -462,10 +459,53 @@ def Plot_3axis_window2(all_users_dicts, gesture, limit=128):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
-
-
 def Plot_3axis(all_users_dicts):
 
     for gesture in VALID_BASES:
         Plot_3axis_window2(all_users_dicts, gesture)
 
+
+#plot 6 axis gyr + accelerometer
+def plot_6_axis(ax, df, user_name, hand):
+    if not df.empty:
+        df_plot = df.copy()
+        configs = [
+            ('acc', '-'),
+            ('gyr', '--')
+        ]
+        colors = ['red', 'green', 'blue']
+        axes_labels = ['x', 'y', 'z']
+        for sensor, ls in configs:
+            cols = [f'{sensor}_x', f'{sensor}_y', f'{sensor}_z']
+            for i, col in enumerate(cols):
+                if col in df_plot.columns:
+                    data_col = pd.to_numeric(df_plot[col], errors='coerce')
+                    label = f"{sensor.upper()}_{'XYZ'[i]}"
+                    ax.plot(df_plot.index, data_col, label=label, color=colors[i], linestyle=ls, lw=1.2)
+
+    ax.set_title(f"{user_name} | 6-Axis Combined")
+    ax.grid(True, alpha=0.2)
+    ax.set_xlabel("Sample Thumb" if hand == 0 else "Sample Index")
+    ax.legend(loc='upper right', fontsize='small', ncol=2)
+def Plot_6axis_window2(all_users_dicts, gesture, limit=128):
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+    fig.suptitle(f"6-Axis Combined Visualization: {gesture}", fontsize=20, fontweight='bold')
+
+    user_names = ['Vasilis', 'Stamy', 'Alex']
+
+    for col, name in enumerate(user_names):
+        u_dict = all_users_dicts.get(name, {})
+        gesture_data = u_dict.get(gesture, {})
+        df_t = gesture_data.get('thumb' if gesture != 'texting' else 'na', pd.DataFrame()).iloc[:limit]
+        plot_6_axis(axes[0, col], df_t, name, 0)
+        df_i = gesture_data.get('index', pd.DataFrame()).iloc[:limit] if gesture != 'texting' else None
+        if df_i is not None and not df_i.empty:
+            plot_6_axis(axes[1, col], df_i, name, 1)
+        else:
+            axes[1, col].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+def Plot_6axis(all_users_dicts):
+    for gesture in VALID_BASES:
+        Plot_6axis_window2(all_users_dicts, gesture)
