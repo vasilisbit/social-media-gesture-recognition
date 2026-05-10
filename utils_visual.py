@@ -425,7 +425,7 @@ def plot(ax, df, sensor, user_name, hand):
     ax.grid(True, alpha=0.2)
 
 
-def Plot_6axis_window2(all_users_dicts, gesture, limit=128):
+def Plot_3axis_window2(all_users_dicts, gesture, limit=128):
 
     fig, axes = plt.subplots(4, 3, figsize=(20, 18))
     fig.suptitle(f"6-Axis Analysis (Thumb vs Index): {gesture}", fontsize=20, fontweight='bold')
@@ -464,8 +464,8 @@ def Plot_6axis_window2(all_users_dicts, gesture, limit=128):
     plt.show()
 
 
-def Plot_6axis(all_users_dicts):
+def Plot_3axis(all_users_dicts):
 
     for gesture in VALID_BASES:
-        Plot_6axis_window2(all_users_dicts, gesture)
+        Plot_3axis_window2(all_users_dicts, gesture)
 
