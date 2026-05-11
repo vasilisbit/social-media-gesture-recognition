@@ -1,0 +1,106 @@
+#--------------------- DB ----------------------
+# DB Connection with the uri (host)
+client: "mongodb://localhost:27017/"
+
+# db name
+db: "IoTSocial"
+
+# db collection
+col: "sensor_data"
+
+
+#--------------------- Dataframe Instantiation ----------------------
+# Raw MetaBase CSVs have columns: Epoch, X, Y, Z (per sensor file).
+# After load_acc_csv / load_gyr_csv they are renamed to acc_* / gyr_*.
+# `order` / `rename` are kept for compatibility with helpers that use df_rebase
+# on legacy 6-axis CSVs (not used by the Phase 2 notebook).
+order:  ["X", "Y", "Z", "X.1", "Y.1", "Z.1"]
+rename: ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
+
+
+#--------------------- Dataset Local Storage ----------------------
+# dataset location (relative to project root)
+data_path: "./data"
+# single data instance location path for visualization workflow
+single_instance_path: "./data/scroll-up/thumb/scroll-up_thumb_0_100_acc_0_a.csv"
+
+
+#--------------------- User mapping (real IDs in filenames) ----------------------
+users: ["a", "b", "s"]            # Alexandros, Vasilis, Stamatia
+train_users: ["a", "b"]
+test_users:  ["s"]
+
+
+#--------------------- Output paths (D8) ----------------------
+out_figures: "./outputs/figures"
+out_results: "./outputs/results"
+out_cache:   "./outputs/cache"
+
+
+#--------------------- Idempotency ----------------------
+# Phase 2 notebook calls mongo_connect(reset=True) so re-runs are safe.
+reset_collection: true
+
+
+#--------------------- Data Engineering ----------------------
+# sliding window algorithm parameters
+# Sliding Window: L=1-3s (50-300 samples), 50% or 75% overlap most common.
+sliding_window:
+  ws: 200            # 2s @ 100Hz
+  overlap: 100       # 50% step
+  w_type: "hann"     # μειώνει spectral leakage σε FFT (FE pipeline)
+  w_center: True
+  print_stats: True
+
+# window index used for visualization purposes
+x_number: 2
+
+# filtering parameterization - Butterworth lowpass, fc=10Hz @ fs=100Hz
+# Butterworth: order 2-4 typical; HAR: 10-20 Hz cutoff.
+filter:
+  order: 4
+  wn: 0.2            # wn = 2*fc/fs = 2*10/100 = 0.2
+  type: "lowpass"
+
+
+#--------------------- Data Preparation ----------------------
+# Dimensionality reduction (diagnostic + PCA+LinSVM baseline)
+PCA:
+  n_comp: 0.95       # keep 95% explained variance
+
+# Sensor-grouped scaling / Per-Channel vs Global Scaling
+scaling:
+  acc_scaler: "standard"
+  gyr_scaler: "robust"
+
+
+#--------------------- EDA ----------------------
+eda:
+  corr_threshold: 0.95          # Highly correlated pairs found (|r| > 0.9)
+  anova_top_k: 10               # top-k features για pairwise scatter
+  pca_evr_threshold: 0.95       # EVR > 80% in 2-5 PCs: 2D plot meaningful
+
+
+random_state: 42
+
+
+#--------------------- Learning ----------------------
+# Classifier - Statistical (defaults; tuned via fine_tune below)
+classifier:
+  SVC:
+    C: 10
+    kernel: "rbf"
+    gamma: "scale"
+
+# Parameter grids for GridSearchCV with Pipeline (clf__ prefix)
+fine_tune:
+  cv: 2              # 2 train subjects -> GroupKFold(n_splits=2)
+  verbose: 1
+  param_grid_svm:
+    clf__C:      [1, 10, 100, 1000]
+    clf__gamma:  ["scale", 0.001, 0.0001]
+    clf__kernel: ["rbf"]
+  param_grid_rf:
+    clf__n_estimators:      [200, 500]
+    clf__max_depth:         [null, 10, 20]
+    clf__min_samples_split: [2, 5]
