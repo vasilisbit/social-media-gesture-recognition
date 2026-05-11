@@ -1,15 +1,11 @@
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
-
-AXIS_COLORS = {"x": "#d62728", "y": "#2ca02c", "z": "#1f77b4"}
-ACC_COLS = ("acc_x", "acc_y", "acc_z")
-GYR_COLS = ("gyr_x", "gyr_y", "gyr_z")
+from utils import VALID_BASES
 
 
 def plot_instance_time_domain(df: pd.DataFrame):
@@ -22,14 +18,11 @@ def plot_instance_time_domain(df: pd.DataFrame):
 
     """
     df.plot(figsize=(20, 10), linewidth=2, fontsize=20).legend(fontsize=18)
-    plt.xlabel('Sample', fontsize=20)
-    plt.ylabel('Axes', fontsize=20)
+    plt.xlabel("Sample", fontsize=20)
+    plt.ylabel("Axes", fontsize=20)
 
 
-def plot_instance_3d(
-        df: pd.DataFrame,
-        axes_list: tuple = ("acc_x", "acc_y", "acc_z")
-):
+def plot_instance_3d(df: pd.DataFrame, axes_list: tuple = ("acc_x", "acc_y", "acc_z")):
     """Plots a 3-axes DataFrame in 3D graph.
 
     Args:
@@ -41,7 +34,7 @@ def plot_instance_3d(
 
     """
     fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection='3d')
+    ax = fig.add_subplot(111, projection="3d")
 
     # print the plot in 3D
 
@@ -49,17 +42,14 @@ def plot_instance_3d(
     ys = df[axes_list[1]]
     zs = df[axes_list[2]]
 
-    ax.scatter(xs, ys, zs, color='green', s=50, alpha=0.6, edgecolors='w')
+    ax.scatter(xs, ys, zs, color="green", s=50, alpha=0.6, edgecolors="w")
 
     ax.set_xlabel(axes_list[0])
     ax.set_ylabel(axes_list[1])
     ax.set_zlabel(axes_list[2])
 
 
-def plot_np_instance(
-        np_array: np.ndarray,
-        columns_list: list
-):
+def plot_np_instance(np_array: np.ndarray, columns_list: list):
     """Plot NumPy instance using DataFrames (pandas). It first transforms the
         array into
     DataFrame with its corresponding columns naming, and then, it plots the
@@ -75,8 +65,8 @@ def plot_np_instance(
     """
     df = pd.DataFrame(np_array, columns=columns_list)
     df.plot(figsize=(20, 10), linewidth=2, fontsize=20)
-    plt.xlabel('Sample', fontsize=20)
-    plt.ylabel('Axes', fontsize=20)
+    plt.xlabel("Sample", fontsize=20)
+    plt.ylabel("Axes", fontsize=20)
 
 
 def plot_heatmap(df: pd.DataFrame):
@@ -89,14 +79,10 @@ def plot_heatmap(df: pd.DataFrame):
 
     """
     plt.figure(figsize=(14, 6))
-    sns.heatmap(df, cmap='plasma')
+    sns.heatmap(df, cmap="plasma")
 
 
-def plot_scatter_pca(
-        df: pd.DataFrame,
-        c_name: str,
-        cmap_set: str = "plasma"
-):
+def plot_scatter_pca(df: pd.DataFrame, c_name: str, cmap_set: str = "plasma"):
     """Visualizes the values of the component columns of the DataFrame
     according to its column that includes the labels.
 
@@ -110,108 +96,163 @@ def plot_scatter_pca(
 
     """
     if len(df.columns) == 3:
-        plt.style.use('classic')
+        plt.style.use("classic")
         plt.figure(figsize=(16, 8))
         plt.scatter(df.iloc[:, 0], df.iloc[:, 1], c=df[c_name], cmap=cmap_set)
-        plt.xlabel('First principal component')
-        plt.ylabel('Second Principal Component')
+        plt.xlabel("First principal component")
+        plt.ylabel("Second Principal Component")
     elif len(df.columns) == 4:
-        plt.style.use('classic')
+        plt.style.use("classic")
         fig = plt.figure(figsize=(16, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        ax.scatter(df.iloc[:, 0], df.iloc[:, 1], df.iloc[:, 2], c=df[c_name], cmap=cmap_set)
-        ax.set_xlabel('First principal component')
-        ax.set_ylabel('Second Principal Component')
-        ax.set_zlabel('Third Principal Component')
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(
+            df.iloc[:, 0], df.iloc[:, 1], df.iloc[:, 2], c=df[c_name], cmap=cmap_set
+        )
+        ax.set_xlabel("First principal component")
+        ax.set_ylabel("Second Principal Component")
+        ax.set_zlabel("Third Principal Component")
     else:
         print("The DataFrame has more than 4 columns.")
 
 
-# -------------------------------------------------------------------------- #
-# Static PNG visualizations for full merged sessions
-# -------------------------------------------------------------------------- #
-
-def session_label(meta: dict) -> str:
-    """Builds a short human-readable label, e.g. 'scroll-up | thumb | user=a'."""
-    parts = [meta["gesture_id"], meta["finger"], meta["typing_style"], f"user={meta['user']}"]
-    return " | ".join(p for p in parts if p != "na")
+# ------------------------------Our Implementation-----------------------------------------#
 
 
-def session_slug(meta: dict) -> str:
-    """Builds a filesystem-safe slug for a session."""
-    return (f"{meta['gesture_id']}_{meta['finger']}_{meta['typing_style']}"
-            f"_h{meta['hand']}_p{meta['primary']}_sr{meta['sr']}_{meta['user']}")
+# Plot 3 axis Window to visualize The data for Each User
+def plot(ax, df, sensor, user_name, hand):
+    if not df.empty:
+        df_plot = df.copy()
+
+        cols = [f"{sensor}_x", f"{sensor}_y", f"{sensor}_z"]
+        for col in cols:
+            df_plot[col] = pd.to_numeric(df_plot[col], errors="coerce")
+
+        ax.plot(df_plot.index, df_plot[f"{sensor}_x"], label="X", color="red", lw=1)
+        ax.plot(df_plot.index, df_plot[f"{sensor}_y"], label="Y", color="green", lw=1)
+        ax.plot(df_plot.index, df_plot[f"{sensor}_z"], label="Z", color="blue", lw=1)
+
+        ax.legend(loc="upper right", fontsize="small", framealpha=0.5)
+
+    if hand == 0:
+        ax.set_xlabel("Sample Thumb")
+    else:
+        ax.set_xlabel("Sample Index")
+
+    ax.set_title(f"{user_name} | {sensor.upper()}")
+    ax.grid(True, alpha=0.2)
 
 
-def _time_axis(df: pd.DataFrame, sr: int) -> pd.Series:
-    """Returns time in seconds. Uses Epoch if present, else sample index / sr."""
-    if "Epoch" in df.columns and len(df) > 0:
-        return (df["Epoch"] - df["Epoch"].iloc[0]) / 1000.0
-    return pd.Series(df.index / sr)
+def Plot_3axis_window2(all_users_dicts, gesture, limit=128, out_dir=None):
+
+    fig, axes = plt.subplots(4, 3, figsize=(20, 18))
+    fig.suptitle(
+        f"3-Axis Analysis (Thumb vs Index): {gesture}", fontsize=20, fontweight="bold"
+    )
+
+    user_names = ["Vasilis", "Stamy", "Alex"]
+
+    for col, name in enumerate(user_names):
+        u_dict = all_users_dicts.get(name, {})
+        gesture_data = u_dict.get(gesture, {})
+        if gesture == "texting":
+            df_t = gesture_data.get("na", pd.DataFrame())
+            df_i = None
+        else:
+            df_t = gesture_data.get("thumb", pd.DataFrame())
+            df_i = gesture_data.get("index", pd.DataFrame())
+
+        df_t = df_t.iloc[:limit]
+        for row, sensor in enumerate(["acc", "gyr"]):
+            ax = axes[row, col]
+            ax.cla()
+            plot(ax, df_t, sensor, user_names[col], 0)
+
+        if df_i is not None and not df_i.empty:
+            df_i = df_i.iloc[:limit]
+            for row, sensor in enumerate(["acc", "gyr"]):
+
+                ax = axes[row + 2, col]
+                ax.cla()
+                plot(ax, df_i, sensor, user_names[col], 1)
+        else:
+            axes[2, col].set_visible(False)
+            axes[3, col].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_dir / f"3axis_{gesture}.png", dpi=150, bbox_inches="tight")
+    plt.show()
 
 
-def plot_session_timeseries(df: pd.DataFrame, meta: dict, out_dir) -> Path:
-    """Saves a 2x3 grid of time-domain plots for the 6 axes of a session."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def Plot_3axis(all_users_dicts, out_dir=None):
 
-    fig, axes = plt.subplots(2, 3, figsize=(13, 6), sharex=True)
-    t = _time_axis(df, meta["sr"])
-    rows = [(ACC_COLS, "Accelerometer (g)"),
-            (GYR_COLS, "Gyroscope (deg/s)")]
-    for row_i, (cols, ylabel) in enumerate(rows):
-        for col_i, col in enumerate(cols):
-            ax = axes[row_i, col_i]
-            ax.plot(t, df[col], color=AXIS_COLORS[col[-1]], linewidth=0.6)
-            ax.set_title(col)
-            ax.grid(alpha=0.3)
-            if col_i == 0:
-                ax.set_ylabel(ylabel)
-    for ax in axes[1]:
-        ax.set_xlabel("Time (s)")
-    fig.suptitle(f"6-axis time domain — {session_label(meta)}", fontsize=12)
-    fig.tight_layout()
-    out = out_dir / f"timeseries_{session_slug(meta)}.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return out
+    for gesture in VALID_BASES:
+        Plot_3axis_window2(all_users_dicts, gesture, out_dir=out_dir)
 
 
-def plot_session_3d(df: pd.DataFrame, meta: dict, out_dir) -> Path:
-    """Saves side-by-side static 3D scatters for acc and gyr of a session."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+# plot 6 axis gyr + accelerometer
+def plot_6_axis(ax, df, user_name, hand):
+    if not df.empty:
+        df_plot = df.copy()
+        configs = [("acc", "-"), ("gyr", "--")]
+        colors = ["red", "green", "blue"]
+        axes_labels = ["x", "y", "z"]
+        for sensor, ls in configs:
+            cols = [f"{sensor}_x", f"{sensor}_y", f"{sensor}_z"]
+            for i, col in enumerate(cols):
+                if col in df_plot.columns:
+                    data_col = pd.to_numeric(df_plot[col], errors="coerce")
+                    label = f"{sensor.upper()}_{'XYZ'[i]}"
+                    ax.plot(
+                        df_plot.index,
+                        data_col,
+                        label=label,
+                        color=colors[i],
+                        linestyle=ls,
+                        lw=1.2,
+                    )
 
-    fig = plt.figure(figsize=(12, 5))
-    panels = [("Accelerometer", ACC_COLS),
-              ("Gyroscope",     GYR_COLS)]
-    for i, (sensor_name, cols) in enumerate(panels):
-        ax = fig.add_subplot(1, 2, i + 1, projection="3d")
-        ax.scatter(df[cols[0]], df[cols[1]], df[cols[2]],
-                    c=df.index, cmap="viridis", s=2, alpha=0.6)
-        ax.set_title(sensor_name)
-        ax.set_xlabel(cols[0])
-        ax.set_ylabel(cols[1])
-        ax.set_zlabel(cols[2])
-    fig.suptitle(f"3D trajectory — {session_label(meta)}", fontsize=12)
-    fig.tight_layout()
-    out = out_dir / f"scatter3d_{session_slug(meta)}.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return out
+    ax.set_title(f"{user_name} | 6-Axis Combined")
+    ax.grid(True, alpha=0.2)
+    ax.set_xlabel("Sample Thumb" if hand == 0 else "Sample Index")
+    ax.legend(loc="upper right", fontsize="small", ncol=2)
 
 
-def visualize_session(df: pd.DataFrame, meta: dict, out_dir):
-    """Saves both time-domain and 3D-scatter plots for a single session."""
-    return plot_session_timeseries(df, meta, out_dir), plot_session_3d(df, meta, out_dir)
+def Plot_6axis_window2(all_users_dicts, gesture, limit=128, out_dir=None):
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+    fig.suptitle(
+        f"6-Axis Combined Visualization: {gesture}", fontsize=20, fontweight="bold"
+    )
+
+    user_names = ["Vasilis", "Stamy", "Alex"]
+
+    for col, name in enumerate(user_names):
+        u_dict = all_users_dicts.get(name, {})
+        gesture_data = u_dict.get(gesture, {})
+        df_t = gesture_data.get(
+            "thumb" if gesture != "texting" else "na", pd.DataFrame()
+        ).iloc[:limit]
+        plot_6_axis(axes[0, col], df_t, name, 0)
+        df_i = (
+            gesture_data.get("index", pd.DataFrame()).iloc[:limit]
+            if gesture != "texting"
+            else None
+        )
+        if df_i is not None and not df_i.empty:
+            plot_6_axis(axes[1, col], df_i, name, 1)
+        else:
+            axes[1, col].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_dir / f"6axis_{gesture}.png", dpi=150, bbox_inches="tight")
+    plt.show()
 
 
-def visualize_all(sessions: Iterable, out_dir) -> int:
-    """Runs visualize_session for every (df, meta); returns the count visualized."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    count = 0
-    for df, meta in sessions:
-        visualize_session(df, meta, out_dir)
-        count += 1
-    return count
+def Plot_6axis(all_users_dicts, out_dir=None):
+    for gesture in VALID_BASES:
+        Plot_6axis_window2(all_users_dicts, gesture, out_dir=out_dir)

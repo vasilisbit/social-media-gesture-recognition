@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 import scipy
+from scipy.signal import butter, filtfilt
 import pandas as pd
 import numpy as np
 from sklearn import preprocessing
@@ -347,10 +348,9 @@ def pair_acc_gyr(csv_paths: Iterable) -> Iterator:
         shared = {k: v for k, v in acc_meta.items() if k != "sensor"}
         yield shared, acc_path, gyr_path
 
-
 def load_acc_csv(path) -> pd.DataFrame:
     """Loads a raw accelerometer CSV (Epoch,X,Y,Z) and renames axes to acc_*."""
-    return (pd.read_csv(path)
+    return (pd.read_csv(path, encoding='utf-8-sig', engine='python')
               .rename(columns={"X": "acc_x", "Y": "acc_y", "Z": "acc_z"})
               .sort_values("Epoch")
               .reset_index(drop=True))
@@ -373,7 +373,6 @@ def merge_acc_gyr(acc_df: pd.DataFrame, gyr_df: pd.DataFrame,
               .dropna(subset=list(SIX_AXES))
               .reset_index(drop=True))
 
-
 def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
                               wn: float = 0.2) -> pd.DataFrame:
     """Zero-phase Butterworth lowpass on the 6 axes (D5).
@@ -386,10 +385,15 @@ def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
     Returns:
         A copy of df with the 6 axes filtered. Other columns are preserved.
     """
-    sos = scipy.signal.butter(order, wn, btype="lowpass", output="sos")
+    b, a = butter(order, wn, btype="lowpass", output="ba")
     out = df.copy()
+
+    # Removing non-float characters and applying filtfilt with padlen=0 to avoid edge artifacts.
     for col in SIX_AXES:
-        out[col] = scipy.signal.sosfiltfilt(sos, df[col].values, padlen=0)
+        clean_col = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+        data = pd.to_numeric(clean_col, errors='coerce').values
+        data = np.nan_to_num(data)
+        out[col] = filtfilt(b, a, data, padlen=0)
     return out
 
 
@@ -423,6 +427,9 @@ def mongo_connect(uri: str = "mongodb://localhost:27017/",
                    collection: str = "sessions",
                    reset: bool = False) -> Collection:
     """Returns a MongoDB collection handle, optionally clearing existing docs."""
+    db = db.strip().replace(" ", "_")
+    collection = collection.strip().replace(" ", "_")
+    client = MongoClient(uri)
     coll = MongoClient(uri)[db][collection]
     if reset:
         coll.delete_many({})
@@ -441,3 +448,26 @@ def insert_documents(coll: Collection, docs: Iterable) -> int:
             tag = f"{doc.get('user')}/{doc.get('gesture_id')}/{doc.get('finger')}"
             print(f"SKIP insert ({tag}): duplicate session_id ({exc})")
     return inserted
+
+# Processing data
+def ProcessingData(pairs):
+    all_users_dicts = {}
+    for meta, acc_p, gyr_p in pairs:
+        df_acc = load_acc_csv(acc_p)
+        df_gyr = load_gyr_csv(gyr_p)
+        merged_df = merge_acc_gyr(df_acc, df_gyr)
+
+        user_map = {'a': 'Alex', 'b': 'Vasilis', 's': 'Stamy'}
+        user_name = user_map.get(meta['user'], meta['user'])
+
+        gesture = meta['gesture_id']
+        hand_label = meta['finger']
+
+        if user_name not in all_users_dicts:
+            all_users_dicts[user_name] = {}
+        if gesture not in all_users_dicts[user_name]:
+            all_users_dicts[user_name][gesture] = {}
+
+        all_users_dicts[user_name][gesture][hand_label] = merged_df
+
+    return all_users_dicts
