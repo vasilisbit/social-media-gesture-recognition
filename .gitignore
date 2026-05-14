@@ -267,3 +267,4 @@ cython_debug/
 *.csv
 /config.yml
 teams_submissions/
+outputs/

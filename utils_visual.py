@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
-from utils import VALID_BASES
+from utils import VALID_BASES, load_acc_csv, load_gyr_csv, merge_acc_gyr, save_figure
 
 
 def plot_instance_time_domain(df: pd.DataFrame):
@@ -115,7 +115,32 @@ def plot_scatter_pca(df: pd.DataFrame, c_name: str, cmap_set: str = "plasma"):
         print("The DataFrame has more than 4 columns.")
 
 
-# ------------------------------Our Implementation-----------------------------------------#
+# -------------------------------------------------------------------------- #
+# Original Data visualization (3-axis and 6-axis) for each user and gesture
+# -------------------------------------------------------------------------- #
+
+def load_data_for_visualization(pairs: list) -> dict:
+    """Processes the raw CSV files and returns a nested dict of DataFrames."""
+    all_users_dicts = {}
+    for meta, acc_p, gyr_p in pairs:
+        df_acc = load_acc_csv(acc_p)
+        df_gyr = load_gyr_csv(gyr_p)
+        merged_df = merge_acc_gyr(df_acc, df_gyr)
+
+        user_map = {'a': 'Alex', 'b': 'Vasilis', 's': 'Stamy'}
+        user_name = user_map.get(meta['user'], meta['user'])
+
+        gesture = meta['gesture_id']
+        hand_label = meta['finger']
+
+        if user_name not in all_users_dicts:
+            all_users_dicts[user_name] = {}
+        if gesture not in all_users_dicts[user_name]:
+            all_users_dicts[user_name][gesture] = {}
+
+        all_users_dicts[user_name][gesture][hand_label] = merged_df
+
+    return all_users_dicts
 
 
 # Plot 3 axis Window to visualize The data for Each User
@@ -256,3 +281,92 @@ def Plot_6axis_window2(all_users_dicts, gesture, limit=128, out_dir=None):
 def Plot_6axis(all_users_dicts, out_dir=None):
     for gesture in VALID_BASES:
         Plot_6axis_window2(all_users_dicts, gesture, out_dir=out_dir)
+
+
+# -------------------------------------------------------------------------- #
+# EDA Visualizations 
+# -------------------------------------------------------------------------- #
+
+def plot_average_durations(df_all: pd.DataFrame):
+    """ Plots the average duration of sessions grouped by gesture class.
+    
+    Args:
+        df_all: The DataFrame containing the continuous raw time-series data.
+    """
+    durations = []
+    for sid, sub in df_all.groupby("session_id"):
+        durations.append({
+            "gesture_id": sub["gesture_id"].iloc[0],
+            "duration_s": len(sub) / 100.0  # sr=100
+        })
+
+    dur_df = pd.DataFrame(durations)
+    fig, ax = plt.subplots(figsize=(10, 3))
+    
+    fig.suptitle("Average Duration per Session (by Class)", fontsize=15)
+    sns.barplot(data=dur_df, x="gesture_id", y="duration_s", errorbar="sd", ax=ax)
+    ax.set_ylabel("Duration (s)")
+    
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    save_figure(fig, "eda_class_durations")
+
+
+def plot_signal_histograms(df_all: pd.DataFrame):
+    """
+    Plots KDE distributions of signals:
+    - X, Y, Z overlaid on the same graph with different colors.
+    - Accelerometer and Gyroscope in separate subplots.
+    - Separate figures for each gesture and finger combination.
+
+    Args:
+        df_all: The DataFrame containing the continuous raw time-series data.
+    """
+    
+    # Group the dataframe by gesture and finger
+    for (gesture, finger), group_df in df_all.groupby(['gesture_id', 'finger']):
+        if group_df.empty:
+            continue
+            
+        fig, axes = plt.subplots(1, 2, figsize=(10, 3))
+        fig.suptitle(f"Signal Distributions (KDE) — {gesture.upper()} ({finger.title()})", 
+                     fontsize=15, fontweight='bold')
+        
+        # Colors for X (Red), Y (Green), Z (Blue)
+        colors = ['#d62728', '#2ca02c', '#1f77b4'] 
+        
+        # --- Accelerometer Plot ---
+        sns.kdeplot(data=group_df['acc_x'], ax=axes[0], color=colors[0], fill=True, label='X', alpha=0.3)
+        sns.kdeplot(data=group_df['acc_y'], ax=axes[0], color=colors[1], fill=True, label='Y', alpha=0.3)
+        sns.kdeplot(data=group_df['acc_z'], ax=axes[0], color=colors[2], fill=True, label='Z', alpha=0.3)
+        
+        axes[0].set_title('Accelerometer')
+        axes[0].set_xlabel('Value')
+        axes[0].set_ylabel('Density')
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend()
+        
+        # --- Gyroscope Plot ---
+        sns.kdeplot(data=group_df['gyr_x'], ax=axes[1], color=colors[0], fill=True, label='X', alpha=0.3)
+        sns.kdeplot(data=group_df['gyr_y'], ax=axes[1], color=colors[1], fill=True, label='Y', alpha=0.3)
+        sns.kdeplot(data=group_df['gyr_z'], ax=axes[1], color=colors[2], fill=True, label='Z', alpha=0.3)
+        
+        axes[1].set_title('Gyroscope')
+        axes[1].set_xlabel('Value')
+        axes[1].set_ylabel('Density')
+        axes[1].grid(True, alpha=0.3)
+        axes[1].legend()
+        
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+
+def plot_windows_per_class(all_labels: list): 
+    """ Plots the count of windows per class after segmentation to visualize class balance.
+    
+    Args:
+        all_labels: A list of class labels corresponding to each segmented window.
+    """ 
+    fig, ax = plt.subplots(figsize=(10, 3))
+    sns.countplot(x=all_labels, ax=ax)
+    ax.set_title("Window Count per Class Post-Segmentation")
+    save_figure(fig, "eda_segmented_class_balance")
+
