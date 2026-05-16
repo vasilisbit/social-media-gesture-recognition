@@ -13,10 +13,15 @@ from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
 import scipy.stats
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import PredefinedSplit, GridSearchCV
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.feature_selection import f_classif
+from sklearn.svm import SVC
 
 VALID_BASES = {"scroll-up", "scroll-down", "swipe-left", "swipe-right", "texting"}
 VALID_USERS = {"a", "b", "s"}
@@ -450,4 +455,131 @@ def save_results(df, name: str) -> Path:
     df.to_csv(path, index=False)
     return path
 
- 
+
+
+#Is it better for our task?
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, RobustScaler
+
+
+def MixedScaling(train_mask, test_mask, windows):
+    feature_cols = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
+
+    Unfold3D = np.array([win[feature_cols].values for win in windows])
+    n_windows, n_timesteps, n_features = Unfold3D.shape
+
+    X_train_3d = Unfold3D[train_mask]
+    X_test_3d = Unfold3D[test_mask]
+
+    X_train_2d = X_train_3d.reshape(-1, n_features)
+    X_test_2d = X_test_3d.reshape(-1, n_features)
+
+    scaler = ColumnTransformer(transformers=[
+        ('accel_scale', StandardScaler(), [0, 1, 2]),  # Προστέθηκε το [0, 1, 2]
+        ('gyro_scale', RobustScaler(), [3, 4, 5])  # Προστέθηκε το [3, 4, 5]
+    ])
+
+    X_train_2d_scaled = scaler.fit_transform(X_train_2d)
+    X_test_2d_scaled = scaler.transform(X_test_2d)
+
+    train_set = X_train_2d_scaled.reshape(X_train_3d.shape[0], n_timesteps * n_features)
+    test_set = X_test_2d_scaled.reshape(X_test_3d.shape[0], n_timesteps * n_features)
+
+    print(f"Έτοιμα Train δεδομένα με σχήμα: {train_set.shape}")
+    print(f"Έτοιμα Test δεδομένα με σχήμα: {test_set.shape}")
+
+    return train_set, test_set
+
+
+#------------------- test ML models ----------------#
+
+def GradientBoosting(train_set,train_labels,test_set,test_labels):
+    gb_model = HistGradientBoostingClassifier(random_state=42)
+    gb_model.fit(train_set, train_labels)
+    print("✔️ Το Gradient Boosting εκπαιδεύτηκε επιτυχώς.")
+
+    y_pred = gb_model.predict(test_set)
+
+
+    return gb_model,y_pred
+
+def SVM(train_set,train_labels,test_set,test_labels):
+    svm_model = SVC(kernel='rbf', C=1.0, random_state=42)
+
+    print("Έναρξη εκπαίδευσης SVM... Παρακαλώ περιμένετε.")
+    svm_model.fit(train_set, train_labels)
+    print("✔️ Το SVM εκπαιδεύτηκε επιτυχώς.")
+
+
+    y_pred = svm_model.predict(test_set)
+
+    return svm_model,y_pred
+
+def LogicRegression(train_set,train_labels,test_set,test_labels):
+    lr_model = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+
+    print("Έναρξη εκπαίδευσης Logistic Regression... Παρακαλώ περιμένετε.")
+    lr_model.fit(train_set, train_labels)
+    print("✔️ Η Λογιστική Παλινδρόμηση εκπαιδεύτηκε επιτυχώς.")
+
+    y_pred = lr_model.predict(test_set)
+
+    return lr_model,y_pred
+
+# Fine Tunning Grid Search ---> do that to go faster
+def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
+    X_all = np.vstack((train_set, test_set))
+    y_all = np.concatenate((train_labels, test_labels))
+
+    test_fold = np.zeros(X_all.shape[0])
+    test_fold[:train_set.shape[0]] = -1
+    ps = PredefinedSplit(test_fold=test_fold)
+
+    if model_name == 'gradient_boosting':
+        estimator = HistGradientBoostingClassifier(random_state=42)
+        param_grid = {
+            'learning_rate': [0.05, 0.1],
+            'max_depth': [3, 5, None],
+            'l2_regularization': [0.0, 1.0, 10.0]
+        }
+
+    elif model_name == 'svm':
+        estimator = SVC(random_state=42)
+        param_grid = {
+            'C': [0.1, 1, 10],
+            'gamma': ['scale', 'auto', 0.01],
+            'kernel': ['rbf', 'linear']
+        }
+
+    elif model_name == 'logistic_regression':
+        estimator = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+        param_grid = {
+            'C': [0.01, 0.1, 1, 10],  # Αντίστροφη ποινή regularization
+            'penalty': ['l2'],  # L2 Regularization (Ridge)
+            'solver': ['lbfgs', 'sag']
+        }
+    else:
+        raise ValueError("Λάθος model_name. Επιλέξτε 'gradient_boosting', 'svm' ή 'logistic_regression'")
+
+    print(f"\n==================================================")
+    print(f" ΕΝΑΡΞΗ GRID SEARCH: {model_name.upper()}")
+    print(f"==================================================")
+
+    # 4. Αρχικοποίηση και εκτέλεση του GridSearchCV
+    grid_search = GridSearchCV(
+        estimator=estimator,
+        param_grid=param_grid,
+        cv=ps,
+        scoring='f1_macro',
+        n_jobs=-1,
+        verbose=1
+    )
+
+    grid_search.fit(X_all, y_all)
+
+    print(f"✔️ Το Grid Search για το {model_name} ολοκληρώθηκε!")
+    print(f"-> Καλύτερες Παράμετροι: {grid_search.best_params_}")
+    print(f"-> Καλύτερο Validation F1-Score: {grid_search.best_score_:.4f}\n")
+
+    return grid_search.best_estimator_

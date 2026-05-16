@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+
 from utils import VALID_BASES, load_acc_csv, load_gyr_csv, merge_acc_gyr, save_figure
 
 
@@ -394,3 +396,39 @@ def plot_windows_per_class(all_labels: list):
     ax.set_title("Window Count per Class Post-Segmentation")
     save_figure(fig, "eda_segmented_class_balance")
 
+#MOdel evaluation
+
+#evaluation ua paei visual
+def ModelEvaluation(model_name, test_labels, y_pred, classes, cmap="Blues"):
+    print(f"\n==================================================")
+    print(f" ΣΤΑΤΙΣΤΙΚΗ ΑΞΙΟΛΟΓΗΣΗ: {model_name}")
+    print(f"==================================================")
+
+    print("\n[1] Classification Report:")
+    print(classification_report(test_labels, y_pred))
+
+
+    cm = confusion_matrix(test_labels, y_pred, labels=classes)
+
+
+    print("[2] Ανάλυση True/False Θετικών και Αρνητικών ανά Χειρονομία:")
+    for i, class_name in enumerate(classes):
+        tp = cm[i, i]
+        fp = cm[:, i].sum() - tp
+        fn = cm[i, :].sum() - tp
+        tn = cm.sum() - (tp + fp + fn)
+
+        print(f"  • Χειρονομία '{class_name}':")
+        print(f"    - True Positives (TP) : {tp}  (Σωστή πρόβλεψη της κίνησης)")
+        print(f"    - False Positives (FP): {fp}  (Άλλη κίνηση που μπερδεύτηκε ως '{class_name}')")
+        print(f"    - False Negatives (FN): {fn}  (Πραγματικό '{class_name}' που χάθηκε)")
+        print(f"    - True Negatives (TN) : {tn}  (Σωστή απόρριψη μη σχετικών κινήσεων)\n")
+
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    disp.plot(cmap=cmap, values_format="d", ax=ax, colorbar=False)
+
+    ax.set_title(f"Confusion Matrix - {model_name}")
+    plt.tight_layout()
+    plt.show()
