@@ -630,3 +630,30 @@ def find_highly_correlated(X: pd.DataFrame, anova_ranking: pd.DataFrame,
             else:
                 drop.add(max(a, b))
     return sorted(drop)
+
+
+def evaluate_classifier(y_true, y_pred) -> dict:
+    """Computes a standard classifier metrics dictionary.
+
+    Reports both weighted and macro F1: the weighted variant tracks
+    overall hit rate when classes are imbalanced, while the macro
+    variant gives every class the same weight and surfaces minority-
+    class failures.
+
+    Args:
+        y_true: Ground-truth labels (1D array-like).
+        y_pred: Predicted labels (1D array-like).
+
+    Returns:
+        Dict with keys ``accuracy``, ``precision``, ``recall``,
+        ``f1_weighted``, and ``f1_macro``. Precision and recall use
+        weighted averaging. All metrics use ``zero_division=0`` so
+        absent classes contribute zero rather than raising.
+    """
+    return {
+        "accuracy":    accuracy_score(y_true, y_pred),
+        "precision":   precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall":      recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_macro":    f1_score(y_true, y_pred, average="macro",    zero_division=0),
+    }
