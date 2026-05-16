@@ -515,7 +515,7 @@ def anova_rank_features(X: pd.DataFrame, y) -> pd.DataFrame:
 
     Args:
         X: Feature DataFrame (N rows by F columns). Train set only;
-            user ``s`` must not be present (D9, D14).
+            the held-out subject must not be present.
         y: 1D label array of length N.
 
     Returns:
@@ -526,3 +526,62 @@ def anova_rank_features(X: pd.DataFrame, y) -> pd.DataFrame:
     return (pd.DataFrame({"feature": X.columns, "F": F, "p_value": p})
               .sort_values("F", ascending=False)
               .reset_index(drop=True))
+
+
+def correlation_diagnostic(X: pd.DataFrame, threshold: float = 0.9) -> dict:
+    """Computes Pearson and Spearman correlation matrices plus a high-pairs
+    diagnostic table.
+
+    Classifies each highly correlated pair as:
+      - ``linear``               if both ``|r_pearson|`` and ``|r_spearman|``
+        exceed the threshold,
+      - ``monotonic_nonlinear``  if only the Spearman magnitude exceeds it
+        (rank order is preserved but the relationship is not linear),
+      - ``outlier_driven``       if only the Pearson magnitude exceeds it
+        (a few extreme points inflate the linear correlation).
+
+    Pairs with both magnitudes below the threshold are treated as
+    independent and omitted from the diagnostic table.
+
+    Args:
+        X: Feature DataFrame (numeric columns only).
+        threshold: Absolute correlation cutoff for "highly correlated"
+            pairs. Defaults to 0.9.
+
+    Returns:
+        Dict with keys:
+          - ``pearson``    (DataFrame): Pearson correlation matrix.
+          - ``spearman``   (DataFrame): Spearman correlation matrix.
+          - ``high_pairs`` (DataFrame): columns ``a``, ``b``,
+            ``r_pearson``, ``r_spearman``, ``kind``; sorted by the larger
+            of the two absolute correlations, descending. Empty if no
+            pair clears the threshold.
+    """
+    p = X.corr(method="pearson")
+    s = X.corr(method="spearman")
+    cols = list(p.columns)
+    rows = []
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            rp = p.iat[i, j]
+            rs = s.iat[i, j]
+            ap, as_ = abs(rp), abs(rs)
+            if ap <= threshold and as_ <= threshold:
+                continue
+            if ap > threshold and as_ > threshold:
+                kind = "linear"
+            elif as_ > threshold:
+                kind = "monotonic_nonlinear"
+            else:
+                kind = "outlier_driven"
+            rows.append({"a": a, "b": b, "r_pearson": rp,
+                         "r_spearman": rs, "kind": kind})
+    high_pairs = pd.DataFrame(rows)
+    if not high_pairs.empty:
+        high_pairs["abs_max"] = (high_pairs[["r_pearson", "r_spearman"]]
+                                   .abs().max(axis=1))
+        high_pairs = (high_pairs.sort_values("abs_max", ascending=False)
+                                .drop(columns="abs_max")
+                                .reset_index(drop=True))
+    return {"pearson": p, "spearman": s, "high_pairs": high_pairs}
