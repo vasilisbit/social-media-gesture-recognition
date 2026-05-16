@@ -457,7 +457,7 @@ def extract_features(window: pd.DataFrame, fs: int = 100) -> dict:
     Per axis (6 axes): mean, std, rms, min, max, median, IQR, skewness,
     kurtosis, ZCR, MAD, dominant freq, spectral energy, mean freq, spectral
     entropy. Per sensor (acc/gyr): SMA, vector-magnitude mean/std, pairwise
-    axis correlations. Total approximately 95 features.
+    axis correlations. Total approximately 102 features.
 
     Args:
         window: DataFrame with the 6 sensor columns (``acc_x``..``gyr_z``)
@@ -502,3 +502,27 @@ def extract_features(window: pd.DataFrame, fs: int = 100) -> dict:
         feats[f"{sensor}_corr_yz"] = np.corrcoef(y, z)[0, 1]
     return feats
 
+
+def anova_rank_features(X: pd.DataFrame, y) -> pd.DataFrame:
+    """Ranks features by ANOVA F-statistic.
+
+    F = MSB / MSW. High F means class means are far apart relative to
+    within-class scatter, so the feature separates classes well. Low F
+    (around 1) means the feature carries no discriminative information.
+
+    HAR caveat: windows from the same subject are not independent. Use
+    F only for ranking; do not take p-values at face value.
+
+    Args:
+        X: Feature DataFrame (N rows by F columns). Train set only;
+            user ``s`` must not be present (D9, D14).
+        y: 1D label array of length N.
+
+    Returns:
+        DataFrame with columns ``feature``, ``F``, ``p_value`` sorted by
+        ``F`` descending.
+    """
+    F, p = f_classif(X.values, y)
+    return (pd.DataFrame({"feature": X.columns, "F": F, "p_value": p})
+              .sort_values("F", ascending=False)
+              .reset_index(drop=True))
