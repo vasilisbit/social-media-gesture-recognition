@@ -450,4 +450,55 @@ def save_results(df, name: str) -> Path:
     df.to_csv(path, index=False)
     return path
 
- 
+
+def extract_features(window: pd.DataFrame, fs: int = 100) -> dict:
+    """Extracts time-domain, spectral, and cross-channel features for a window.
+
+    Per axis (6 axes): mean, std, rms, min, max, median, IQR, skewness,
+    kurtosis, ZCR, MAD, dominant freq, spectral energy, mean freq, spectral
+    entropy. Per sensor (acc/gyr): SMA, vector-magnitude mean/std, pairwise
+    axis correlations. Total approximately 95 features.
+
+    Args:
+        window: DataFrame with the 6 sensor columns (``acc_x``..``gyr_z``)
+            and ``ws`` rows.
+        fs: Sampling frequency in Hz. Defaults to 100.
+
+    Returns:
+        Dict mapping ``{axis}_{feat}`` (and ``{sensor}_{feat}`` for
+        cross-channel) to scalar values.
+    """
+    feats = {}
+    for col in SIX_AXES:
+        x = window[col].values
+        feats[f"{col}_mean"]   = x.mean()
+        feats[f"{col}_std"]    = x.std()
+        feats[f"{col}_rms"]    = np.sqrt((x ** 2).mean())
+        feats[f"{col}_min"]    = x.min()
+        feats[f"{col}_max"]    = x.max()
+        feats[f"{col}_median"] = np.median(x)
+        feats[f"{col}_iqr"]    = np.percentile(x, 75) - np.percentile(x, 25)
+        feats[f"{col}_skew"]   = scipy.stats.skew(x)
+        feats[f"{col}_kurt"]   = scipy.stats.kurtosis(x)
+        feats[f"{col}_zcr"]    = ((x[:-1] * x[1:]) < 0).mean()
+        feats[f"{col}_mad"]    = np.mean(np.abs(x - x.mean()))
+        X = np.abs(np.fft.rfft(x))
+        freqs = np.fft.rfftfreq(len(x), 1 / fs)
+        p = X ** 2 / max((X ** 2).sum(), 1e-12)
+        feats[f"{col}_dom_freq"]     = freqs[np.argmax(X)]
+        feats[f"{col}_spec_energy"]  = (X ** 2).sum()
+        feats[f"{col}_mean_freq"]    = (freqs * p).sum()
+        feats[f"{col}_spec_entropy"] = -(p[p > 0] * np.log2(p[p > 0])).sum()
+    for sensor in ("acc", "gyr"):
+        x = window[f"{sensor}_x"]
+        y = window[f"{sensor}_y"]
+        z = window[f"{sensor}_z"]
+        feats[f"{sensor}_sma"]     = (x.abs() + y.abs() + z.abs()).mean()
+        vm = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+        feats[f"{sensor}_vm_mean"] = vm.mean()
+        feats[f"{sensor}_vm_std"]  = vm.std()
+        feats[f"{sensor}_corr_xy"] = np.corrcoef(x, y)[0, 1]
+        feats[f"{sensor}_corr_xz"] = np.corrcoef(x, z)[0, 1]
+        feats[f"{sensor}_corr_yz"] = np.corrcoef(y, z)[0, 1]
+    return feats
+
