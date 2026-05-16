@@ -585,3 +585,48 @@ def correlation_diagnostic(X: pd.DataFrame, threshold: float = 0.9) -> dict:
                                 .drop(columns="abs_max")
                                 .reset_index(drop=True))
     return {"pearson": p, "spearman": s, "high_pairs": high_pairs}
+
+
+def find_highly_correlated(X: pd.DataFrame, anova_ranking: pd.DataFrame,
+                            threshold: float = 0.95) -> list:
+    """Returns the features to drop so that no two surviving features have
+    absolute Pearson correlation above ``threshold``.
+
+    For each correlated pair, the member with the lower ANOVA F-score is
+    marked for removal, keeping the better single-feature discriminator.
+    When scores tie, the alphabetically larger name is dropped so the
+    output is deterministic.
+
+    Args:
+        X: Feature DataFrame whose columns will be considered for
+            pruning.
+        anova_ranking: DataFrame produced by ``anova_rank_features``
+            containing at least the columns ``feature`` and ``F``.
+            Features absent from this table are treated as having
+            ``F = 0``.
+        threshold: Absolute Pearson correlation cutoff. Pairs at or
+            below this magnitude are left alone. Defaults to 0.95.
+
+    Returns:
+        Sorted list of feature names to drop from ``X``. Applying
+        ``X.drop(columns=result)`` leaves only the highest-F member of
+        each correlated cluster.
+    """
+    f_score = dict(zip(anova_ranking["feature"], anova_ranking["F"]))
+    corr = X.corr().abs()
+    cols = list(corr.columns)
+    drop = set()
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            if corr.iat[i, j] <= threshold:
+                continue
+            fa = f_score.get(a, 0.0)
+            fb = f_score.get(b, 0.0)
+            if fa > fb:
+                drop.add(b)
+            elif fb > fa:
+                drop.add(a)
+            else:
+                drop.add(max(a, b))
+    return sorted(drop)
