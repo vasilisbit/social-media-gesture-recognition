@@ -520,9 +520,18 @@ def anova_rank_features(X: pd.DataFrame, y) -> pd.DataFrame:
 
     Returns:
         DataFrame with columns ``feature``, ``F``, ``p_value`` sorted by
-        ``F`` descending.
+        ``F`` descending. Constant (zero-variance) columns yield ``F=NaN``;
+        ``find_highly_correlated`` drops those downstream.
     """
-    F, p = f_classif(X.values, y)
+    import warnings
+    with warnings.catch_warnings():
+        # sklearn warns when a column has zero variance (UserWarning) and
+        # numpy warns about the resulting 0/0 division (RuntimeWarning).
+        # Both are expected here: the NaN F-score is the signal that
+        # find_highly_correlated uses to drop the column.
+        warnings.filterwarnings("ignore", message="Features .* are constant.")
+        warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+        F, p = f_classif(X.values, y)
     return (pd.DataFrame({"feature": X.columns, "F": F, "p_value": p})
               .sort_values("F", ascending=False)
               .reset_index(drop=True))
@@ -592,7 +601,10 @@ def find_highly_correlated(X: pd.DataFrame, anova_ranking: pd.DataFrame,
     """Returns the features to drop so that no two surviving features have
     absolute Pearson correlation above ``threshold``.
 
-    For each correlated pair, the member with the lower ANOVA F-score is
+    Zero-variance ("constant") features are always dropped: their ANOVA F is
+    undefined (``NaN``), their correlations with every other column are
+    ``NaN``, and they break downstream scalers. For the remaining columns
+    the member of each correlated pair with the lower ANOVA F-score is
     marked for removal, keeping the better single-feature discriminator.
     When scores tie, the alphabetically larger name is dropped so the
     output is deterministic.
@@ -610,16 +622,21 @@ def find_highly_correlated(X: pd.DataFrame, anova_ranking: pd.DataFrame,
     Returns:
         Sorted list of feature names to drop from ``X``. Applying
         ``X.drop(columns=result)`` leaves only the highest-F member of
-        each correlated cluster.
+        each correlated cluster and removes any constant columns.
     """
     f_score = dict(zip(anova_ranking["feature"], anova_ranking["F"]))
     corr = X.corr().abs()
     cols = list(corr.columns)
-    drop = set()
+    drop = {c for c in cols if not np.isfinite(f_score.get(c, 0.0))}
     for i, a in enumerate(cols):
+        if a in drop:
+            continue
         for j in range(i + 1, len(cols)):
             b = cols[j]
-            if corr.iat[i, j] <= threshold:
+            if b in drop:
+                continue
+            r = corr.iat[i, j]
+            if not np.isfinite(r) or r <= threshold:
                 continue
             fa = f_score.get(a, 0.0)
             fb = f_score.get(b, 0.0)
