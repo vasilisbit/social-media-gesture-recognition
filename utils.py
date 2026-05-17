@@ -3,7 +3,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
-
+from sklearn.experimental import enable_halving_search_cv  # Crucial import!
+from sklearn.model_selection import HalvingGridSearchCV, PredefinedSplit
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, sosfiltfilt
@@ -495,7 +496,7 @@ def MixedScaling(train_mask, test_mask, windows):
 #------------------- test ML models ----------------#
 
 def GradientBoosting(train_set,train_labels,test_set,test_labels):
-    gb_model = HistGradientBoostingClassifier(random_state=42)
+    gb_model = HistGradientBoostingClassifier(max_iter=100, max_depth=5, random_state=42)
     gb_model.fit(train_set, train_labels)
     print("✔️ Το Gradient Boosting εκπαιδεύτηκε επιτυχώς.")
 
@@ -505,7 +506,7 @@ def GradientBoosting(train_set,train_labels,test_set,test_labels):
     return gb_model,y_pred
 
 def SVM(train_set,train_labels,test_set,test_labels):
-    svm_model = SVC(kernel='rbf', C=1.0, random_state=42)
+    svm_model = SVC(kernel='rbf', C=1.0, cache_size=1000, random_state=42)
 
     print("Έναρξη εκπαίδευσης SVM... Παρακαλώ περιμένετε.")
     svm_model.fit(train_set, train_labels)
@@ -517,7 +518,7 @@ def SVM(train_set,train_labels,test_set,test_labels):
     return svm_model,y_pred
 
 def LogicRegression(train_set,train_labels,test_set,test_labels):
-    lr_model = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+    lr_model = LogisticRegression(max_iter=1000, n_jobs=-1, random_state=42)
 
     print("Έναρξη εκπαίδευσης Logistic Regression... Παρακαλώ περιμένετε.")
     lr_model.fit(train_set, train_labels)
@@ -540,12 +541,12 @@ def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
         estimator = HistGradientBoostingClassifier(random_state=42)
         param_grid = {
             'learning_rate': [0.05, 0.1],
-            'max_depth': [3, 5, None],
+            'max_depth': [3, 5, 8],
             'l2_regularization': [0.0, 1.0, 10.0]
         }
 
     elif model_name == 'svm':
-        estimator = SVC(random_state=42)
+        estimator = SVC(cache_size=500, random_state=42)
         param_grid = {
             'C': [0.1, 1, 10],
             'gamma': ['scale', 'auto', 0.01],
@@ -553,7 +554,7 @@ def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
         }
 
     elif model_name == 'logistic_regression':
-        estimator = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+        estimator = LogisticRegression(max_iter=1000, random_state=42)
         param_grid = {
             'C': [0.01, 0.1, 1, 10],  # Αντίστροφη ποινή regularization
             'penalty': ['l2'],  # L2 Regularization (Ridge)
@@ -567,13 +568,17 @@ def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
     print(f"==================================================")
 
     # 4. Αρχικοποίηση και εκτέλεση του GridSearchCV
-    grid_search = GridSearchCV(
+    grid_search = HalvingGridSearchCV(
         estimator=estimator,
         param_grid=param_grid,
         cv=ps,
         scoring='f1_macro',
         n_jobs=-1,
-        verbose=1
+        verbose=1,
+        random_state=42,
+        factor=4,
+        min_resources=400,
+        aggressive_elimination=True
     )
 
     grid_search.fit(X_all, y_all)
