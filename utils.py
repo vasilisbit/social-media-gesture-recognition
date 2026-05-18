@@ -2,7 +2,7 @@ import secrets
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, Dict, Iterable, Iterator, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,10 +13,16 @@ from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
 import scipy.stats
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.feature_selection import f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import GridSearchCV, GroupKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.svm import SVC
 
 VALID_BASES = {"scroll-up", "scroll-down", "swipe-left", "swipe-right", "texting"}
 VALID_USERS = {"a", "b", "s"}
@@ -674,3 +680,158 @@ def evaluate_classifier(y_true, y_pred) -> dict:
         "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
         "f1_macro":    f1_score(y_true, y_pred, average="macro",    zero_division=0),
     }
+
+
+def build_preprocessor(columns: Iterable[str]) -> ColumnTransformer:
+    """Sensor-grouped ColumnTransformer for engineered tabular features.
+
+    Accelerometer-derived columns (names starting with ``acc_``) are scaled
+    with :class:`StandardScaler` since acc magnitudes are close to Gaussian
+    after gravity removal. Gyroscope-derived columns (``gyr_``) use
+    :class:`RobustScaler` to absorb the heavy tails from quick wrist
+    motions. Any remaining columns (cross-channel features such as
+    ``acc_sma``, ``gyr_vm_mean``, etc.) are scaled with
+    :class:`StandardScaler`.
+
+    The returned transformer is meant to be the first step of a
+    :class:`Pipeline` so that it is refit on every cross-validation fold
+    and no held-out statistics leak into the training set.
+
+    Args:
+        columns: Iterable of column names in the order they appear in the
+            feature matrix passed downstream.
+
+    Returns:
+        A :class:`ColumnTransformer` ready to be the first step of a
+        :class:`Pipeline`.
+    """
+    cols = list(columns)
+    acc_cols   = [c for c in cols if c.startswith("acc_")]
+    gyr_cols   = [c for c in cols if c.startswith("gyr_")]
+    other_cols = [c for c in cols if c not in acc_cols + gyr_cols]
+    parts = [
+        ("acc", StandardScaler(), acc_cols),
+        ("gyr", RobustScaler(),   gyr_cols),
+    ]
+    if other_cols:
+        parts.append(("other", StandardScaler(), other_cols))
+    return ColumnTransformer(parts)
+
+
+# Inline grids for classifiers whose parameter space is not declared in
+# config.yml. Keys carry the `clf__` prefix because the Pipeline step that
+# wraps the classifier is named ``clf``.
+_FEATURE_INLINE_PARAM_GRIDS: Dict[str, Dict[str, list]] = {
+    "gradient-boosting": {
+        "clf__learning_rate":     [0.05, 0.1],
+        "clf__max_depth":         [3, 5, 8],
+        "clf__l2_regularization": [0.0, 1.0, 10.0],
+    },
+    "logistic-regression": {
+        "clf__C":       [0.01, 0.1, 1, 10],
+        "clf__penalty": ["l2"],
+        "clf__solver":  ["lbfgs", "sag"],
+    },
+}
+
+
+def _make_feature_classifier(model_name: str, cfg: dict):
+    """Instantiate one of the four classifiers used by the FE pipeline."""
+    rs = int(cfg.get("random_state", 42))
+    if model_name == "svm-rbf":
+        return SVC(class_weight="balanced", random_state=rs)
+    if model_name == "randomforest":
+        return RandomForestClassifier(
+            class_weight="balanced", n_jobs=-1, random_state=rs
+        )
+    if model_name == "gradient-boosting":
+        return HistGradientBoostingClassifier(random_state=rs)
+    if model_name == "logistic-regression":
+        return LogisticRegression(max_iter=1000, random_state=rs)
+    raise ValueError(
+        f"Unknown model_name={model_name!r}. Expected one of "
+        "'svm-rbf', 'randomforest', 'gradient-boosting', "
+        "'logistic-regression'."
+    )
+
+
+def _resolve_feature_param_grid(model_name: str, cfg: dict) -> Dict[str, list]:
+    """Look up the parameter grid for ``model_name``.
+
+    SVM-RBF and Random Forest pull their grids from
+    ``cfg["fine_tune"]``. The other two use the inline defaults
+    declared in this module.
+    """
+    ft = cfg.get("fine_tune", {})
+    if model_name == "svm-rbf":
+        return dict(ft["param_grid_svm"])
+    if model_name == "randomforest":
+        return dict(ft["param_grid_rf"])
+    return dict(_FEATURE_INLINE_PARAM_GRIDS[model_name])
+
+
+def tune_feature_classifier(
+    model_name: str,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    cfg: dict,
+) -> Tuple[Pipeline, Dict[str, Any], float]:
+    """Subject-aware grid search for one classifier on engineered features.
+
+    Builds a :class:`Pipeline` whose first step is the sensor-grouped
+    :class:`ColumnTransformer` from :func:`build_preprocessor`, so the
+    scaler is refit on every cross-validation fold. Runs
+    :class:`GridSearchCV` with
+    ``GroupKFold(n_splits=cfg["fine_tune"]["cv"])`` and passes
+    ``groups=groups_train`` so the two training subjects are split across
+    the folds (one subject per fold) and no subject appears on both sides
+    of a fold. The held-out evaluation subject is never seen by the grid
+    search.
+
+    Args:
+        model_name: One of ``"svm-rbf"``, ``"randomforest"``,
+            ``"gradient-boosting"``, ``"logistic-regression"``.
+        X_train: Feature matrix for the training subjects. Column names
+            are used by :func:`build_preprocessor` to assign each column
+            to its sensor group.
+        y_train: Training labels.
+        groups_train: Subject identifier per training window. Must
+            contain at least ``cfg["fine_tune"]["cv"]`` distinct values.
+        cfg: Loaded configuration dictionary. Reads ``random_state``,
+            ``fine_tune.cv``, ``fine_tune.verbose``,
+            ``fine_tune.param_grid_svm``, ``fine_tune.param_grid_rf``.
+
+    Returns:
+        Tuple of ``(best_pipeline, best_params, best_cv_f1_macro)``.
+
+    Raises:
+        ValueError: If ``model_name`` is not recognized or if
+            ``groups_train`` has fewer than ``cfg.fine_tune.cv``
+            distinct subjects.
+    """
+    n_splits = int(cfg.get("fine_tune", {}).get("cv", 2))
+    n_groups = int(np.unique(groups_train).size)
+    if n_groups < n_splits:
+        raise ValueError(
+            f"Need at least {n_splits} distinct subjects for "
+            f"GroupKFold(n_splits={n_splits}); got {n_groups}."
+        )
+
+    pre = build_preprocessor(X_train.columns)
+    clf = _make_feature_classifier(model_name, cfg)
+    pipe = Pipeline(steps=[("pre", pre), ("clf", clf)])
+    grid = _resolve_feature_param_grid(model_name, cfg)
+
+    gs = GridSearchCV(
+        estimator=pipe,
+        param_grid=grid,
+        cv=GroupKFold(n_splits=n_splits),
+        scoring="f1_macro",
+        n_jobs=-1,
+        refit=True,
+        verbose=int(cfg.get("fine_tune", {}).get("verbose", 0)),
+    )
+    gs.fit(X_train, y_train, groups=groups_train)
+
+    return gs.best_estimator_, dict(gs.best_params_), float(gs.best_score_)
