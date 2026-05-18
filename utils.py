@@ -1,10 +1,11 @@
+import random
 import secrets
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 from sklearn.experimental import enable_halving_search_cv  # Crucial import!
-from sklearn.model_selection import HalvingGridSearchCV, PredefinedSplit
+from sklearn.model_selection import HalvingGridSearchCV, PredefinedSplit, GroupKFold
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, sosfiltfilt
@@ -492,6 +493,15 @@ def MixedScaling(train_mask, test_mask, windows):
 
     return train_set, test_set
 
+def rescale(train_set,test_set):
+    re_scaler = ColumnTransformer(transformers=[
+        ('accel_scale', StandardScaler(), [0, 1, 2]),
+        ('gyro_scale', RobustScaler(), [3, 4, 5])
+    ])
+    train_set_rescaled = re_scaler.fit_transform(train_set)
+    test_set_rescaled = re_scaler.transform(test_set)
+    return train_set_rescaled, test_set_rescaled
+
 
 #------------------- test ML models ----------------#
 
@@ -529,14 +539,12 @@ def LogicRegression(train_set,train_labels,test_set,test_labels):
     return lr_model,y_pred
 
 # Fine Tunning Grid Search ---> do that to go faster
-def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
-    X_all = np.vstack((train_set, test_set))
-    y_all = np.concatenate((train_labels, test_labels))
+def Fine_Tunning(model_name,train_set,train_labels,test_set,cfg,groups):
+    rescaleTrain, rescaleTest=rescale(train_set,test_set)
+    rs = random.Random(42)
 
-    test_fold = np.zeros(X_all.shape[0])
-    test_fold[:train_set.shape[0]] = -1
-    ps = PredefinedSplit(test_fold=test_fold)
-
+    n_splits = int(cfg.get("fine_tune", {}).get("cv", 2))
+    n_groups = int(np.unique(groups).size)
     if model_name == 'gradient_boosting':
         estimator = HistGradientBoostingClassifier(random_state=42)
         param_grid = {
@@ -571,7 +579,7 @@ def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
     grid_search = HalvingGridSearchCV(
         estimator=estimator,
         param_grid=param_grid,
-        cv=ps,
+        cv=GroupKFold(n_splits=n_splits),
         scoring='f1_macro',
         n_jobs=-1,
         verbose=1,
@@ -581,10 +589,10 @@ def Fine_Tunning(model_name,train_set,train_labels,test_set,test_labels):
         aggressive_elimination=True
     )
 
-    grid_search.fit(X_all, y_all)
+    grid_search.fit(rescaleTrain, train_labels, groups=groups)
 
     print(f"✔️ Το Grid Search για το {model_name} ολοκληρώθηκε!")
     print(f"-> Καλύτερες Παράμετροι: {grid_search.best_params_}")
     print(f"-> Καλύτερο Validation F1-Score: {grid_search.best_score_:.4f}\n")
 
-    return grid_search.best_estimator_
+    return grid_search.best_estimator_,rescaleTest
