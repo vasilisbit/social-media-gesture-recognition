@@ -948,6 +948,10 @@ def tune_feature_classifier(
         ValueError: If ``model_name`` is not recognized or if
             ``groups_train`` has fewer than ``cfg.fine_tune.cv``
             distinct subjects.
+
+    Notes:
+        Previously named ``Fine_tuning``. The old name is kept as a
+        module-level alias so existing notebooks continue to resolve it.
     """
     n_splits = int(cfg.get("fine_tune", {}).get("cv", 2))
     n_groups = int(np.unique(groups_train).size)
@@ -974,3 +978,8 @@ def tune_feature_classifier(
     gs.fit(X_train, y_train, groups=groups_train)
 
     return gs.best_estimator_, dict(gs.best_params_), float(gs.best_score_)
+
+
+# Back-compat alias. Original name from the first time-series notebook draft;
+# kept so existing call sites (e.g. utils.Fine_tuning) keep resolving.
+Fine_tuning = tune_feature_classifier
