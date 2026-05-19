@@ -718,6 +718,77 @@ def build_preprocessor(columns: Iterable[str]) -> ColumnTransformer:
     return ColumnTransformer(parts)
 
 
+def scale_and_flatten_windows(
+    train_mask: np.ndarray,
+    test_mask: np.ndarray,
+    windows: Iterable[pd.DataFrame],
+    feature_cols: Tuple[str, ...] = SIX_AXES,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sensor-grouped scaling for raw 6-axis windows, returned as flat matrices.
+
+    Stacks the per-window DataFrames into a 3D array of shape
+    ``(n_windows, n_timesteps, n_axes)``, splits by the boolean masks, flattens
+    each side into ``(n_windows * n_timesteps, n_axes)`` so timesteps act as
+    extra rows, fits :func:`build_preprocessor` on the train rows only, applies
+    the fitted scaler to the test rows, then reshapes back to a flat 2D matrix
+    of shape ``(n_windows, n_timesteps * n_axes)`` ready to feed classical ML
+    estimators that expect 2D input.
+
+    Reuses :func:`build_preprocessor` so the time-series pipeline and the
+    engineered-feature pipeline share a single source of truth for sensor-grouped
+    scaling (StandardScaler on ``acc_*``, RobustScaler on ``gyr_*``).
+
+    Args:
+        train_mask: Boolean array of length ``n_windows`` selecting training
+            windows (e.g. ``data["train_mask"]`` from ``segmented.pkl``).
+        test_mask: Boolean array of length ``n_windows`` selecting test windows.
+        windows: Iterable of per-window DataFrames; each must contain
+            ``feature_cols`` and have the same number of rows.
+        feature_cols: Channel ordering to extract from each window. Defaults to
+            :data:`SIX_AXES`.
+
+    Returns:
+        Tuple ``(train_set, test_set)`` of float ``ndarray`` with shapes
+        ``(train_mask.sum(), n_timesteps * len(feature_cols))`` and
+        ``(test_mask.sum(), n_timesteps * len(feature_cols))``.
+
+    Notes:
+        Previously named ``MixedScaling``. The old name is kept as a module-level
+        alias so existing notebooks continue to import it.
+    """
+    feature_cols = list(feature_cols)
+
+    Unfold3D = np.array([win[feature_cols].values for win in windows])
+    _, n_timesteps, n_features = Unfold3D.shape
+
+    X_train_3d = Unfold3D[train_mask]
+    X_test_3d = Unfold3D[test_mask]
+
+    X_train_2d = X_train_3d.reshape(-1, n_features)
+    X_test_2d = X_test_3d.reshape(-1, n_features)
+
+    X_train_df = pd.DataFrame(X_train_2d, columns=feature_cols)
+    X_test_df = pd.DataFrame(X_test_2d, columns=feature_cols)
+
+    scaler = build_preprocessor(X_train_df.columns)
+
+    X_train_2d_scaled = scaler.fit_transform(X_train_df)
+    X_test_2d_scaled = scaler.transform(X_test_df)
+
+    train_set = X_train_2d_scaled.reshape(X_train_3d.shape[0], n_timesteps * n_features)
+    test_set = X_test_2d_scaled.reshape(X_test_3d.shape[0], n_timesteps * n_features)
+
+    print(f"Train set ready with shape: {train_set.shape}")
+    print(f"Test set ready with shape:  {test_set.shape}")
+
+    return train_set, test_set
+
+
+# Back-compat alias. Original name from the first time-series notebook draft;
+# kept so existing call sites (e.g. utils.MixedScaling) keep resolving.
+MixedScaling = scale_and_flatten_windows
+
+
 # Per-model parameter-grid keys under ``cfg["fine_tune"]``. The ``clf__``
 # prefix on each grid entry matches the Pipeline step that wraps the
 # classifier.
