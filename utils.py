@@ -848,6 +848,67 @@ def _resolve_feature_param_grid(model_name: str, cfg: dict) -> Dict[str, list]:
     return dict(ft[key])
 
 
+# Default classifier shortlist for the time-series modeling notebook.
+# Kept at module scope so back-compat callers (e.g. utils.TrainAllMLs) can
+# resolve a sensible default without threading the list through every call.
+model_names = ["svm-rbf", "randomforest", "gradient-boosting", "logistic-regression"]
+
+
+def train_classifiers(
+    model_names: Iterable[str],
+    train_set: np.ndarray,
+    train_labels: np.ndarray,
+    test_set: np.ndarray,
+    cfg: dict,
+) -> Tuple[list, list]:
+    """Fit a shortlist of classifiers on one training set and predict on a test set.
+
+    Iterates over ``model_names``, builds each estimator with
+    :func:`_make_feature_classifier` (so per-model overrides from
+    ``cfg["fine_tune"]["base_params"]`` are honoured), fits it on
+    ``(train_set, train_labels)``, and collects the test-set predictions.
+
+    Args:
+        model_names: Iterable of classifier identifiers. Each must be one of
+            ``"svm-rbf"``, ``"randomforest"``, ``"gradient-boosting"``,
+            ``"logistic-regression"``.
+        train_set: 2D float array of shape ``(n_train, n_features)``.
+        train_labels: 1D label array of length ``n_train``.
+        test_set: 2D float array of shape ``(n_test, n_features)`` with the
+            same column count as ``train_set``.
+        cfg: Loaded configuration dictionary. Forwarded to
+            :func:`_make_feature_classifier` for ``random_state`` and the
+            optional ``fine_tune.base_params`` block.
+
+    Returns:
+        Tuple ``(trained_models, predictions)`` of parallel lists, both
+        indexed in the same order as ``model_names``. ``predictions[i]`` is
+        the array of predicted labels for the test set from
+        ``trained_models[i]``.
+
+    Notes:
+        Previously named ``TrainAllMLs``. The old name is kept as a thin
+        module-level wrapper so existing notebooks continue to call
+        ``utils.TrainAllMLs(...)`` against the default ``model_names`` list.
+    """
+    trained_models = []
+    predictions = []
+    for i in model_names:
+        model = _make_feature_classifier(i, cfg)
+        model.fit(train_set, train_labels)
+        y_pred = model.predict(test_set)
+        trained_models.append(model)
+        predictions.append(y_pred)
+    return trained_models, predictions
+
+
+# Back-compat alias. Original signature took no ``model_names`` argument and
+# used the module-level constant of the same name; preserved here so existing
+# notebooks keep working without edits.
+def TrainAllMLs(train_set, train_labels, test_set, cfg):
+    return train_classifiers(model_names, train_set, train_labels, test_set, cfg)
+
+
 def tune_feature_classifier(
     model_name: str,
     X_train: pd.DataFrame,
