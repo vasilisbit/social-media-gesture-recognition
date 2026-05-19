@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+
 from utils import VALID_BASES, load_acc_csv, load_gyr_csv, merge_acc_gyr, save_figure
 
 
@@ -394,3 +396,65 @@ def plot_windows_per_class(all_labels: list):
     ax.set_title("Window Count per Class Post-Segmentation")
     save_figure(fig, "eda_segmented_class_balance")
 
+
+def plot_classifier_evaluation(model_name, test_labels, y_pred, classes, cmap="Blues"):
+    """Print a classifier evaluation report and plot its confusion matrix.
+
+    Emits the standard scikit-learn ``classification_report``, then walks the
+    confusion matrix row by row to print per-class true positive, false
+    positive, false negative and true negative counts. Finally draws a
+    confusion-matrix display with ``cmap`` colouring and shows the figure
+    inline.
+
+    Args:
+        model_name: Display name of the model, used in headings and the
+            figure title.
+        test_labels: 1D array of ground-truth labels for the held-out set.
+        y_pred: 1D array of predicted labels of the same length as
+            ``test_labels``.
+        classes: Ordered iterable of class identifiers; used both for
+            ``confusion_matrix(labels=...)`` and as display labels on the
+            plot, so the matrix rows / columns line up with the caller's
+            expected ordering.
+        cmap: Matplotlib colormap name passed to
+            :class:`ConfusionMatrixDisplay`. Defaults to ``"Blues"``.
+
+    Notes:
+        Previously named ``ModelEvaluation``. The old name is kept as a
+        module-level alias so existing notebooks continue to call
+        ``utils_visual.ModelEvaluation(...)`` without edits.
+    """
+    print(f"\n==================================================")
+    print(f" STATISTICAL EVALUATION: {model_name}")
+    print(f"==================================================")
+
+    print("\n[1] Classification Report:")
+    print(classification_report(test_labels, y_pred))
+
+    cm = confusion_matrix(test_labels, y_pred, labels=classes)
+
+    print("[2] True/False Positive and Negative Breakdown per Gesture:")
+    for i, class_name in enumerate(classes):
+        tp = cm[i, i]
+        fp = cm[:, i].sum() - tp
+        fn = cm[i, :].sum() - tp
+        tn = cm.sum() - (tp + fp + fn)
+
+        print(f"  - Gesture '{class_name}':")
+        print(f"    - True Positives  (TP): {tp}  (correct prediction of this gesture)")
+        print(f"    - False Positives (FP): {fp}  (other gestures misclassified as '{class_name}')")
+        print(f"    - False Negatives (FN): {fn}  (actual '{class_name}' that was missed)")
+        print(f"    - True Negatives  (TN): {tn}  (correct rejection of unrelated gestures)\n")
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    disp.plot(cmap=cmap, values_format="d", ax=ax, colorbar=False)
+
+    ax.set_title(f"Confusion Matrix - {model_name}")
+    plt.tight_layout()
+    plt.show()
+
+
+# Back-compat alias. Original name from the first time-series notebook draft;
+# kept so existing call sites (e.g. utils_visual.ModelEvaluation) keep resolving.
+ModelEvaluation = plot_classifier_evaluation
