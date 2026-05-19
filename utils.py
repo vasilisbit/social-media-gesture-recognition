@@ -1,9 +1,11 @@
+import random
 import secrets
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
-
+from typing import Iterable, Iterator, Dict, Tuple, Any
+from sklearn.experimental import enable_halving_search_cv  # Crucial import!
+from sklearn.model_selection import HalvingGridSearchCV, PredefinedSplit, GroupKFold
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, sosfiltfilt
@@ -13,19 +15,27 @@ from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
 import scipy.stats
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import PredefinedSplit, GridSearchCV
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.feature_selection import f_classif
+from sklearn.svm import SVC
+
+
 
 VALID_BASES = {"scroll-up", "scroll-down", "swipe-left", "swipe-right", "texting"}
 VALID_USERS = {"a", "b", "s"}
 VALID_SENSORS_PER_FILE = {"acc", "gyr"}
 VARIANT_TO_FINGER_STYLE = {
-    "thumb":  ("thumb", "na"),
-    "index":  ("index", "na"),
-    "two":    ("na",    "two_handed"),
-    "single": ("na",    "single_handed"),
+    "thumb": ("thumb", "na"),
+    "index": ("index", "na"),
+    "two": ("na", "two_handed"),
+    "single": ("na", "single_handed"),
 }
 SIX_AXES = ("acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z")
 
@@ -36,7 +46,7 @@ SIX_AXES = ("acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z")
 
 
 # -------------------------------------------------------------------------- #
-# Raw CSV → merged 6-axis documents, 
+# Raw CSV → merged 6-axis documents,
 # -------------------------------------------------------------------------- #
 
 def parse_filename(name: str) -> dict:
@@ -75,14 +85,14 @@ def parse_filename(name: str) -> dict:
         raise ValueError(f"Bad user in {name!r}: {user!r}")
     finger, typing_style = VARIANT_TO_FINGER_STYLE[variant]
     return {
-        "gesture_id":   base,
-        "finger":       finger,
+        "gesture_id": base,
+        "finger": finger,
         "typing_style": typing_style,
-        "hand":         int(hand),
-        "sr":           int(sr),
-        "sensor":       sensor,
-        "primary":      int(primary),
-        "user":         user,
+        "hand": int(hand),
+        "sr": int(sr),
+        "sensor": sensor,
+        "primary": int(primary),
+        "user": user,
     }
 
 
@@ -122,7 +132,7 @@ def pair_acc_gyr(csv_paths: Iterable) -> Iterator:
             print(f"SKIP {key}: missing {missing}")
             continue
         acc_path, acc_meta = sensors["acc"]
-        gyr_path, _        = sensors["gyr"]
+        gyr_path, _ = sensors["gyr"]
         shared = {k: v for k, v in acc_meta.items() if k != "sensor"}
         yield shared, acc_path, gyr_path
 
@@ -175,20 +185,20 @@ def merge_acc_gyr(acc_df: pd.DataFrame, gyr_df: pd.DataFrame,
                   tolerance_ms: int = 10) -> pd.DataFrame:
     """Aligns acc/gyr by Epoch with merge_asof; drops rows missing any axis."""
     merged = pd.merge_asof(acc_df, gyr_df, on="Epoch",
-                            direction="nearest", tolerance=tolerance_ms)
+                           direction="nearest", tolerance=tolerance_ms)
     return (merged
-              .dropna(subset=list(SIX_AXES))
-              .reset_index(drop=True))
+            .dropna(subset=list(SIX_AXES))
+            .reset_index(drop=True))
 
 
 # -------------------------------------------------------------------------- #
-# Filtering, mongo connection , encoding 
+# Filtering, mongo connection , encoding
 # -------------------------------------------------------------------------- #
 
 def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
-                              wn: float = 0.2) -> pd.DataFrame:
+                            wn: float = 0.2) -> pd.DataFrame:
     """Zero-phase Butterworth lowpass on the 6 axes using SOS format.
-    
+
     Args:
         df: DataFrame containing the SIX_AXES columns.
         order: Butterworth order. Defaults to 4.
@@ -202,35 +212,35 @@ def apply_continuous_filter(df: pd.DataFrame, order: int = 4,
 
     for col in SIX_AXES:
         data = pd.to_numeric(df[col], errors='coerce').values
-        
+
         # Replace NaNs with 0 to avoid issues with sosfiltfilt
         data = pd.Series(data).interpolate(limit_direction='both').fillna(0).values
-        out[col] = sosfiltfilt(sos, data, padlen=0)        
+        out[col] = sosfiltfilt(sos, data, padlen=0)
     return out
 
 
 def build_document(df: pd.DataFrame, meta: dict) -> dict:
     """Builds the MongoDB document from a 6-axis DataFrame and shared metadata."""
     return {
-        "session_id":   secrets.token_hex(12),
-        "data":         {col: df[col].tolist() for col in SIX_AXES},
-        "gesture_id":   meta["gesture_id"],
-        "finger":       meta["finger"],
+        "session_id": secrets.token_hex(12),
+        "data": {col: df[col].tolist() for col in SIX_AXES},
+        "gesture_id": meta["gesture_id"],
+        "finger": meta["finger"],
         "typing_style": meta["typing_style"],
-        "hand":         meta["hand"],
-        "sr":           meta["sr"],
-        "sensor":       "AccGyr",
-        "primary":      meta["primary"],
-        "spontaneous":  0,
-        "user":         meta["user"],
-        "datetime":     datetime.now(timezone.utc),
+        "hand": meta["hand"],
+        "sr": meta["sr"],
+        "sensor": "AccGyr",
+        "primary": meta["primary"],
+        "spontaneous": 0,
+        "user": meta["user"],
+        "datetime": datetime.now(timezone.utc),
     }
 
 
 def mongo_connect(uri: str = "mongodb://localhost:27017/",
-                   db: str = "aiot_gestures",
-                   collection: str = "sessions",
-                   reset: bool = False) -> Collection:
+                  db: str = "aiot_gestures",
+                  collection: str = "sessions",
+                  reset: bool = False) -> Collection:
     """Returns a MongoDB collection handle, optionally clearing existing docs."""
     db = db.strip().replace(" ", "_")
     collection = collection.strip().replace(" ", "_")
@@ -294,7 +304,7 @@ def sliding_window_pd(
     """
     windows_counter = 0
     windows_list = list()
-    # min_periods: minimum number of observations in window required to have a value 
+    # min_periods: minimum number of observations in window required to have a value
     # For a window that is specified by an integer, min_periods will default to the size of the window.
     for window in df.rolling(window=ws, step=overlap, min_periods=ws,
                              win_type=w_type, center=w_center):
@@ -412,9 +422,9 @@ def df_rebase(df: pd.DataFrame, target_list: list, ref_list: list) -> pd.DataFra
 
 
 def rename_df_column_values(
-    np_array: np.ndarray,
-    y: list,
-    columns_names: tuple = ("acc_x", "acc_y", "acc_z")
+        np_array: np.ndarray,
+        y: list,
+        columns_names: tuple = ("acc_x", "acc_y", "acc_z")
 ):
     """Builds a DataFrame with a label column whose values are replaced by
     the index of each unique label.
@@ -450,4 +460,250 @@ def save_results(df, name: str) -> Path:
     df.to_csv(path, index=False)
     return path
 
- 
+# -------------------------------------------------------------------------- #
+# Scalling Phase: Mixed Scaling for both Windowing and feature engineering
+# -------------------------------------------------------------------------- #
+
+#Init Scaler--> Its the build_preprocessor funtion in feature engineering
+def InitScale(columns: Iterable[str]) -> ColumnTransformer:
+    cols = list(columns)
+    acc_cols = [c for c in cols if c.startswith("acc_")]
+    gyr_cols = [c for c in cols if c.startswith("gyr_")]
+    other_cols = [c for c in cols if c not in acc_cols + gyr_cols]
+    parts = [
+        ("acc", StandardScaler(), acc_cols),
+        ("gyr", RobustScaler(), gyr_cols),
+    ]
+    if other_cols:
+        parts.append(("other", StandardScaler(), other_cols))
+    return ColumnTransformer(parts)
+
+#Scale For Windowing part
+def MixedScaling(train_mask, test_mask, windows):
+    feature_cols = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
+
+    Unfold3D = np.array([win[feature_cols].values for win in windows])
+    n_windows, n_timesteps, n_features = Unfold3D.shape
+
+    X_train_3d = Unfold3D[train_mask]
+    X_test_3d = Unfold3D[test_mask]
+
+    X_train_2d = X_train_3d.reshape(-1, n_features)
+    X_test_2d = X_test_3d.reshape(-1, n_features)
+
+    X_train_df = pd.DataFrame(X_train_2d, columns=feature_cols)
+    X_test_df = pd.DataFrame(X_test_2d, columns=feature_cols)
+
+    scaler = InitScale(X_train_df.columns)
+
+    X_train_2d_scaled = scaler.fit_transform(X_train_df)
+    X_test_2d_scaled = scaler.transform(X_test_df)
+
+    train_set = X_train_2d_scaled.reshape(X_train_3d.shape[0], n_timesteps * n_features)
+    test_set = X_test_2d_scaled.reshape(X_test_3d.shape[0], n_timesteps * n_features)
+
+    print(f"Έτοιμα Train δεδομένα με σχήμα: {train_set.shape}")
+    print(f"Έτοιμα Test δεδομένα με σχήμα: {test_set.shape}")
+
+    return train_set, test_set
+
+# -------------------------------------------------------------------------- #
+# Feature Engineering Phase
+# -------------------------------------------------------------------------- #
+def extract_features(window: pd.DataFrame, fs: int = 100) -> dict:
+    feats = {}
+    for col in SIX_AXES:
+        x = window[col].values
+        feats[f"{col}_mean"]   = x.mean()
+        feats[f"{col}_std"]    = x.std()
+        feats[f"{col}_rms"]    = np.sqrt((x ** 2).mean())
+        feats[f"{col}_min"]    = x.min()
+        feats[f"{col}_max"]    = x.max()
+        feats[f"{col}_median"] = np.median(x)
+        feats[f"{col}_iqr"]    = np.percentile(x, 75) - np.percentile(x, 25)
+        feats[f"{col}_skew"]   = scipy.stats.skew(x)
+        feats[f"{col}_kurt"]   = scipy.stats.kurtosis(x)
+        feats[f"{col}_zcr"]    = ((x[:-1] * x[1:]) < 0).mean()
+        feats[f"{col}_mad"]    = np.mean(np.abs(x - x.mean()))
+        X = np.abs(np.fft.rfft(x))
+        freqs = np.fft.rfftfreq(len(x), 1 / fs)
+        p = X ** 2 / max((X ** 2).sum(), 1e-12)
+        feats[f"{col}_dom_freq"]     = freqs[np.argmax(X)]
+        feats[f"{col}_spec_energy"]  = (X ** 2).sum()
+        feats[f"{col}_mean_freq"]    = (freqs * p).sum()
+        feats[f"{col}_spec_entropy"] = -(p[p > 0] * np.log2(p[p > 0])).sum()
+    for sensor in ("acc", "gyr"):
+        x = window[f"{sensor}_x"]
+        y = window[f"{sensor}_y"]
+        z = window[f"{sensor}_z"]
+        feats[f"{sensor}_sma"]     = (x.abs() + y.abs() + z.abs()).mean()
+        vm = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+        feats[f"{sensor}_vm_mean"] = vm.mean()
+        feats[f"{sensor}_vm_std"]  = vm.std()
+        feats[f"{sensor}_corr_xy"] = np.corrcoef(x, y)[0, 1]
+        feats[f"{sensor}_corr_xz"] = np.corrcoef(x, z)[0, 1]
+        feats[f"{sensor}_corr_yz"] = np.corrcoef(y, z)[0, 1]
+    return feats
+
+def anova_rank_features(X: pd.DataFrame, y) -> pd.DataFrame:
+    import warnings
+    with warnings.catch_warnings():
+        # sklearn warns when a column has zero variance (UserWarning) and
+        # numpy warns about the resulting 0/0 division (RuntimeWarning).
+        # Both are expected here: the NaN F-score is the signal that
+        # find_highly_correlated uses to drop the column.
+        warnings.filterwarnings("ignore", message="Features .* are constant.")
+        warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+        F, p = f_classif(X.values, y)
+    return (pd.DataFrame({"feature": X.columns, "F": F, "p_value": p})
+              .sort_values("F", ascending=False)
+              .reset_index(drop=True))
+
+
+def correlation_diagnostic(X: pd.DataFrame, threshold: float = 0.9) -> dict:
+    p = X.corr(method="pearson")
+    s = X.corr(method="spearman")
+    cols = list(p.columns)
+    rows = []
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            rp = p.iat[i, j]
+            rs = s.iat[i, j]
+            ap, as_ = abs(rp), abs(rs)
+            if ap <= threshold and as_ <= threshold:
+                continue
+            if ap > threshold and as_ > threshold:
+                kind = "linear"
+            elif as_ > threshold:
+                kind = "monotonic_nonlinear"
+            else:
+                kind = "outlier_driven"
+            rows.append({"a": a, "b": b, "r_pearson": rp,
+                         "r_spearman": rs, "kind": kind})
+    high_pairs = pd.DataFrame(rows)
+    if not high_pairs.empty:
+        high_pairs["abs_max"] = (high_pairs[["r_pearson", "r_spearman"]]
+                                   .abs().max(axis=1))
+        high_pairs = (high_pairs.sort_values("abs_max", ascending=False)
+                                .drop(columns="abs_max")
+                                .reset_index(drop=True))
+    return {"pearson": p, "spearman": s, "high_pairs": high_pairs}
+
+
+def find_highly_correlated(X: pd.DataFrame, anova_ranking: pd.DataFrame,
+                            threshold: float = 0.95) -> list:
+    f_score = dict(zip(anova_ranking["feature"], anova_ranking["F"]))
+    corr = X.corr().abs()
+    cols = list(corr.columns)
+    drop = {c for c in cols if not np.isfinite(f_score.get(c, 0.0))}
+    for i, a in enumerate(cols):
+        if a in drop:
+            continue
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            if b in drop:
+                continue
+            r = corr.iat[i, j]
+            if not np.isfinite(r) or r <= threshold:
+                continue
+            fa = f_score.get(a, 0.0)
+            fb = f_score.get(b, 0.0)
+            if fa > fb:
+                drop.add(b)
+            elif fb > fa:
+                drop.add(a)
+            else:
+                drop.add(max(a, b))
+    return sorted(drop)
+
+
+def evaluate_classifier(y_true, y_pred) -> dict:
+    return {
+        "accuracy":    accuracy_score(y_true, y_pred),
+        "precision":   precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall":      recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_macro":    f1_score(y_true, y_pred, average="macro",    zero_division=0),
+    }
+
+# -------------------------------------------------------------------------- #
+# ML Models functions
+# -------------------------------------------------------------------------- #
+
+model_names=["svm-rbf","randomforest","gradient-boosting","logistic-regression"]
+
+#returns one of the four models to train
+def _make_feature_classifier(model_name: str, cfg: dict):
+    rs = int(cfg.get("random_state", 42))
+    if model_name == "svm-rbf":
+        return SVC(class_weight="balanced",cache_size=1000,random_state=rs) #to perform faster
+    if model_name == "randomforest":
+        return RandomForestClassifier(
+            class_weight="balanced", n_jobs=-1, random_state=rs
+        )
+    if model_name == "gradient-boosting":
+        return HistGradientBoostingClassifier(max_iter=100,max_depth=5,random_state=rs) # in order to not go forever
+    if model_name == "logistic-regression":
+        return LogisticRegression(max_iter=3000,solver="saga",random_state=rs,class_weight="balanced")
+    raise ValueError(
+        f"Unknown model_name={model_name!r}. Expected one of "
+        "'svm-rbf', 'randomforest', 'gradient-boosting', "
+        "'logistic-regression'."
+    )
+
+#train all ML models
+def TrainAllMLs(train_set,train_labels,test_set,cfg):
+    trained_models=[]
+    predictions=[]
+    for i in model_names:
+       model = _make_feature_classifier(i,cfg)
+       model.fit(train_set,train_labels)
+       y_pred = model.predict(test_set)
+       trained_models.append(model)
+       predictions.append(y_pred)
+    return trained_models,predictions
+
+# -------------------------------------------------------------------------- #
+# Fine Tuning the ML models
+# -------------------------------------------------------------------------- #
+def _resolve_feature_param_grid(model_name: str, cfg: dict) -> Dict[str, list]:
+    ft = cfg.get("fine_tune", {})
+    if model_name == "svm-rbf":
+        return dict(ft["param_grid_svm"])
+    elif model_name == "randomforest":
+        return dict(ft["param_grid_rf"])
+    elif model_name == "gradient-boosting":
+        return dict(ft["param_grid_gbt"])
+    elif model_name == "logistic-regression":
+        return dict(ft["param_grid_lr"])
+
+#Its a combined for Windowing and feature engineering
+def Fine_tuning(model_name: str,X_train: pd.DataFrame,y_train: np.ndarray,groups_train: np.ndarray,
+    cfg: dict,)-> Tuple[Pipeline, Dict[str, Any], float]:
+    n_splits = int(cfg.get("fine_tune", {}).get("cv", 2))
+    n_groups = int(np.unique(groups_train).size)
+    if n_groups < n_splits:
+        raise ValueError(
+            f"Need at least {n_splits} distinct subjects for "
+            f"GroupKFold(n_splits={n_splits}); got {n_groups}."
+        )
+
+    pre = InitScale(X_train.columns)
+    clf = _make_feature_classifier(model_name, cfg)
+    pipe = Pipeline(steps=[("pre", pre), ("clf", clf)])
+    grid = _resolve_feature_param_grid(model_name, cfg)
+
+    gs = GridSearchCV(
+        estimator=pipe,
+        param_grid=grid,
+        cv=GroupKFold(n_splits=n_splits),
+        scoring="f1_macro",
+        n_jobs=-1,
+        refit=True,
+        verbose=int(cfg.get("fine_tune", {}).get("verbose", 0)),
+    )
+    gs.fit(X_train, y_train, groups=groups_train)
+
+    return gs.best_estimator_, dict(gs.best_params_), float(gs.best_score_)
+

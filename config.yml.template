@@ -26,9 +26,17 @@ single_instance_path: "./data/scroll-up/thumb/scroll-up_thumb_0_100_acc_0_a.csv"
 
 
 #--------------------- User mapping (real IDs in filenames) ----------------------
-users: ["a", "b", "s"]            # Alexandros, Vasilis, Stamatia
-train_users: ["a", "b"]
-test_users:  ["s"]
+users:
+  - "a"  # Alexandros
+  - "b"  # Vasilis
+  - "s"  # Stamatia
+
+train_users:
+  - "a"
+  - "b"
+
+test_users:
+  - "s"
 
 
 #--------------------- Output paths (D8) ----------------------
@@ -104,3 +112,11 @@ fine_tune:
     clf__n_estimators:      [200, 500]
     clf__max_depth:         [null, 10, 20]
     clf__min_samples_split: [2, 5]
+  param_grid_gbt:
+    clf__learning_rate:      [0.05, 0.1]
+    clf__max_depth:          [3, 5, 8]
+    clf__l2_regularization:  [0.0, 1.0, 10.0]
+  param_grid_lr:
+    clf__C:        [0.01, 0.1, 1, 10]
+    clf__penalty:  ["l2"]
+    clf__solver:   ["lbfgs", "sag"]

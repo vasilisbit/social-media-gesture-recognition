@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+
 from utils import VALID_BASES, load_acc_csv, load_gyr_csv, merge_acc_gyr, save_figure
 
 
@@ -168,7 +170,6 @@ def plot(ax, df, sensor, user_name, hand):
 
 
 def Plot_3axis_window2(all_users_dicts, gesture, limit=128, out_dir=None):
-
     fig, axes = plt.subplots(4, 3, figsize=(20, 18))
     fig.suptitle(
         f"3-Axis Analysis (Thumb vs Index): {gesture}", fontsize=20, fontweight="bold"
@@ -195,7 +196,6 @@ def Plot_3axis_window2(all_users_dicts, gesture, limit=128, out_dir=None):
         if df_i is not None and not df_i.empty:
             df_i = df_i.iloc[:limit]
             for row, sensor in enumerate(["acc", "gyr"]):
-
                 ax = axes[row + 2, col]
                 ax.cla()
                 plot(ax, df_i, sensor, user_names[col], 1)
@@ -212,7 +212,6 @@ def Plot_3axis_window2(all_users_dicts, gesture, limit=128, out_dir=None):
 
 
 def Plot_3axis(all_users_dicts, out_dir=None):
-
     for gesture in VALID_BASES:
         Plot_3axis_window2(all_users_dicts, gesture, out_dir=out_dir)
 
@@ -284,7 +283,7 @@ def Plot_6axis(all_users_dicts, out_dir=None):
 
 
 # -------------------------------------------------------------------------- #
-# EDA Visualizations 
+# EDA Visualizations
 # -------------------------------------------------------------------------- #
 
 def plot_average_durations(df_all: pd.DataFrame):
@@ -305,7 +304,7 @@ def plot_average_durations(df_all: pd.DataFrame):
         sr = float(sub["sr"].iloc[0])
         durations.append({
             "gesture_id": sub["gesture_id"].iloc[0],
-            "finger":     sub["finger"].iloc[0],
+            "finger": sub["finger"].iloc[0],
             "duration_s": len(sub) / sr,
         })
 
@@ -315,8 +314,8 @@ def plot_average_durations(df_all: pd.DataFrame):
     # the bar shows the full recording time (thumb + index ~= 300 s for the
     # swipe/scroll classes; texting has finger="na" and shows a single segment).
     pivot = (dur_df.groupby(["gesture_id", "finger"])["duration_s"]
-                   .mean()
-                   .unstack(fill_value=0.0))
+             .mean()
+             .unstack(fill_value=0.0))
 
     finger_colors = {"thumb": "#1f77b4", "index": "#ff7f0e", "na": "#2ca02c"}
     colors = [finger_colors.get(c) for c in pivot.columns]
@@ -352,7 +351,7 @@ def plot_signal_histograms(df_all: pd.DataFrame):
         df_all: The DataFrame containing the continuous raw time-series data.
     """
     sensors = (("Accelerometer", ("acc_x", "acc_y", "acc_z")),
-               ("Gyroscope",     ("gyr_x", "gyr_y", "gyr_z")))
+               ("Gyroscope", ("gyr_x", "gyr_y", "gyr_z")))
 
     for (gesture, finger), group_df in df_all.groupby(['gesture_id', 'finger']):
         if group_df.empty:
@@ -383,14 +382,48 @@ def plot_signal_histograms(df_all: pd.DataFrame):
         save_figure(fig, f"eda_signal_dist_{gesture}_{finger}")
 
 
-def plot_windows_per_class(all_labels: list): 
+def plot_windows_per_class(all_labels: list):
     """ Plots the count of windows per class after segmentation to visualize class balance.
-    
+
     Args:
         all_labels: A list of class labels corresponding to each segmented window.
-    """ 
+    """
     fig, ax = plt.subplots(figsize=(10, 3))
     sns.countplot(x=all_labels, ax=ax)
     ax.set_title("Window Count per Class Post-Segmentation")
     save_figure(fig, "eda_segmented_class_balance")
 
+
+# MOdel evaluation
+
+# evaluation ua paei visual
+def ModelEvaluation(model_name, test_labels, y_pred, classes, cmap="Blues"):
+    print(f"\n==================================================")
+    print(f" ΣΤΑΤΙΣΤΙΚΗ ΑΞΙΟΛΟΓΗΣΗ: {model_name}")
+    print(f"==================================================")
+
+    print("\n[1] Classification Report:")
+    print(classification_report(test_labels, y_pred))
+
+    cm = confusion_matrix(test_labels, y_pred, labels=classes)
+
+    print("[2] Ανάλυση True/False Θετικών και Αρνητικών ανά Χειρονομία:")
+    for i, class_name in enumerate(classes):
+        tp = cm[i, i]
+        fp = cm[:, i].sum() - tp
+        fn = cm[i, :].sum() - tp
+        tn = cm.sum() - (tp + fp + fn)
+
+        print(f"  • Χειρονομία '{class_name}':")
+        print(f"    - True Positives (TP) : {tp}  (Σωστή πρόβλεψη της κίνησης)")
+        print(f"    - False Positives (FP): {fp}  (Άλλη κίνηση που μπερδεύτηκε ως '{class_name}')")
+        print(f"    - False Negatives (FN): {fn}  (Πραγματικό '{class_name}' που χάθηκε)")
+        print(f"    - True Negatives (TN) : {tn}  (Σωστή απόρριψη μη σχετικών κινήσεων)\n")
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    disp.plot(cmap=cmap, values_format="d", ax=ax, colorbar=False)
+
+    ax.set_title(f"Confusion Matrix - {model_name}")
+    plt.tight_layout()
+    plt.show()
