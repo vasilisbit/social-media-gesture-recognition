@@ -718,36 +718,39 @@ def build_preprocessor(columns: Iterable[str]) -> ColumnTransformer:
     return ColumnTransformer(parts)
 
 
-# Inline grids for classifiers whose parameter space is not declared in
-# config.yml. Keys carry the `clf__` prefix because the Pipeline step that
-# wraps the classifier is named ``clf``.
-_FEATURE_INLINE_PARAM_GRIDS: Dict[str, Dict[str, list]] = {
-    "gradient-boosting": {
-        "clf__learning_rate":     [0.05, 0.1],
-        "clf__max_depth":         [3, 5, 8],
-        "clf__l2_regularization": [0.0, 1.0, 10.0],
-    },
-    "logistic-regression": {
-        "clf__C":       [0.01, 0.1, 1, 10],
-        "clf__penalty": ["l2"],
-        "clf__solver":  ["lbfgs", "sag"],
-    },
+# Per-model parameter-grid keys under ``cfg["fine_tune"]``. The ``clf__``
+# prefix on each grid entry matches the Pipeline step that wraps the
+# classifier.
+_FEATURE_GRID_KEYS: Dict[str, str] = {
+    "svm-rbf":             "param_grid_svm",
+    "randomforest":        "param_grid_rf",
+    "gradient-boosting":   "param_grid_gbt",
+    "logistic-regression": "param_grid_lr",
 }
 
 
 def _make_feature_classifier(model_name: str, cfg: dict):
-    """Instantiate one of the four classifiers used by the FE pipeline."""
+    """Instantiate one of the four classifiers used by the FE pipeline.
+
+    Reads optional per-model overrides from ``cfg["fine_tune"]["base_params"]``
+    and merges them into the constructor kwargs, so deployment-specific knobs
+    (e.g. LogisticRegression ``max_iter=3000`` / ``solver="saga"`` for the
+    time-series pipeline) live in config instead of source.
+    """
     rs = int(cfg.get("random_state", 42))
+    overrides = dict(cfg.get("fine_tune", {}).get("base_params", {}).get(model_name, {}))
     if model_name == "svm-rbf":
-        return SVC(class_weight="balanced", random_state=rs)
+        kwargs = {"class_weight": "balanced", "random_state": rs, **overrides}
+        return SVC(**kwargs)
     if model_name == "randomforest":
-        return RandomForestClassifier(
-            class_weight="balanced", n_jobs=-1, random_state=rs
-        )
+        kwargs = {"class_weight": "balanced", "n_jobs": -1, "random_state": rs, **overrides}
+        return RandomForestClassifier(**kwargs)
     if model_name == "gradient-boosting":
-        return HistGradientBoostingClassifier(random_state=rs)
+        kwargs = {"random_state": rs, **overrides}
+        return HistGradientBoostingClassifier(**kwargs)
     if model_name == "logistic-regression":
-        return LogisticRegression(max_iter=1000, random_state=rs)
+        kwargs = {"max_iter": 1000, "random_state": rs, **overrides}
+        return LogisticRegression(**kwargs)
     raise ValueError(
         f"Unknown model_name={model_name!r}. Expected one of "
         "'svm-rbf', 'randomforest', 'gradient-boosting', "
@@ -756,18 +759,22 @@ def _make_feature_classifier(model_name: str, cfg: dict):
 
 
 def _resolve_feature_param_grid(model_name: str, cfg: dict) -> Dict[str, list]:
-    """Look up the parameter grid for ``model_name``.
+    """Look up the parameter grid for ``model_name`` in ``cfg["fine_tune"]``.
 
-    SVM-RBF and Random Forest pull their grids from
-    ``cfg["fine_tune"]``. The other two use the inline defaults
-    declared in this module.
+    All four classifiers read their grids from config (keys
+    ``param_grid_svm``, ``param_grid_rf``, ``param_grid_gbt``,
+    ``param_grid_lr``) so a single edit to ``config.yml`` rolls through
+    every notebook that calls :func:`tune_feature_classifier`.
     """
     ft = cfg.get("fine_tune", {})
-    if model_name == "svm-rbf":
-        return dict(ft["param_grid_svm"])
-    if model_name == "randomforest":
-        return dict(ft["param_grid_rf"])
-    return dict(_FEATURE_INLINE_PARAM_GRIDS[model_name])
+    try:
+        key = _FEATURE_GRID_KEYS[model_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown model_name={model_name!r}. Expected one of "
+            f"{sorted(_FEATURE_GRID_KEYS)}."
+        ) from exc
+    return dict(ft[key])
 
 
 def tune_feature_classifier(
