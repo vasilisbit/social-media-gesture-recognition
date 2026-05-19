@@ -120,3 +120,13 @@ fine_tune:
     clf__C:        [0.01, 0.1, 1, 10]
     clf__penalty:  ["l2"]
     clf__solver:   ["lbfgs", "sag"]
+  # Per-model kwargs merged into the estimator constructor before fitting.
+  # Lets the time-series pipeline (1200-dim flattened windows) bump LR's
+  # max_iter / solver without forking _make_feature_classifier.
+  base_params:
+    svm-rbf:
+      cache_size: 1000
+    logistic-regression:
+      max_iter: 3000
+      solver: "saga"
+      class_weight: "balanced"
