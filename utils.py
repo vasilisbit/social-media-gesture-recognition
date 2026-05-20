@@ -2,7 +2,7 @@ import secrets
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, Dict, Iterable, Iterator, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,10 +13,16 @@ from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
 import scipy.stats
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.feature_selection import f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import GridSearchCV, GroupKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.svm import SVC
 
 VALID_BASES = {"scroll-up", "scroll-down", "swipe-left", "swipe-right", "texting"}
 VALID_USERS = {"a", "b", "s"}
@@ -450,4 +456,530 @@ def save_results(df, name: str) -> Path:
     df.to_csv(path, index=False)
     return path
 
- 
+
+def extract_features(window: pd.DataFrame, fs: int = 100) -> dict:
+    """Extracts time-domain, spectral, and cross-channel features for a window.
+
+    Per axis (6 axes): mean, std, rms, min, max, median, IQR, skewness,
+    kurtosis, ZCR, MAD, dominant freq, spectral energy, mean freq, spectral
+    entropy. Per sensor (acc/gyr): SMA, vector-magnitude mean/std, pairwise
+    axis correlations. Total approximately 102 features.
+
+    Args:
+        window: DataFrame with the 6 sensor columns (``acc_x``..``gyr_z``)
+            and ``ws`` rows.
+        fs: Sampling frequency in Hz. Defaults to 100.
+
+    Returns:
+        Dict mapping ``{axis}_{feat}`` (and ``{sensor}_{feat}`` for
+        cross-channel) to scalar values.
+    """
+    feats = {}
+    for col in SIX_AXES:
+        x = window[col].values
+        feats[f"{col}_mean"]   = x.mean()
+        feats[f"{col}_std"]    = x.std()
+        feats[f"{col}_rms"]    = np.sqrt((x ** 2).mean())
+        feats[f"{col}_min"]    = x.min()
+        feats[f"{col}_max"]    = x.max()
+        feats[f"{col}_median"] = np.median(x)
+        feats[f"{col}_iqr"]    = np.percentile(x, 75) - np.percentile(x, 25)
+        feats[f"{col}_skew"]   = scipy.stats.skew(x)
+        feats[f"{col}_kurt"]   = scipy.stats.kurtosis(x)
+        feats[f"{col}_zcr"]    = ((x[:-1] * x[1:]) < 0).mean()
+        feats[f"{col}_mad"]    = np.mean(np.abs(x - x.mean()))
+        X = np.abs(np.fft.rfft(x))
+        freqs = np.fft.rfftfreq(len(x), 1 / fs)
+        p = X ** 2 / max((X ** 2).sum(), 1e-12)
+        feats[f"{col}_dom_freq"]     = freqs[np.argmax(X)]
+        feats[f"{col}_spec_energy"]  = (X ** 2).sum()
+        feats[f"{col}_mean_freq"]    = (freqs * p).sum()
+        feats[f"{col}_spec_entropy"] = -(p[p > 0] * np.log2(p[p > 0])).sum()
+    for sensor in ("acc", "gyr"):
+        x = window[f"{sensor}_x"]
+        y = window[f"{sensor}_y"]
+        z = window[f"{sensor}_z"]
+        feats[f"{sensor}_sma"]     = (x.abs() + y.abs() + z.abs()).mean()
+        vm = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+        feats[f"{sensor}_vm_mean"] = vm.mean()
+        feats[f"{sensor}_vm_std"]  = vm.std()
+        feats[f"{sensor}_corr_xy"] = np.corrcoef(x, y)[0, 1]
+        feats[f"{sensor}_corr_xz"] = np.corrcoef(x, z)[0, 1]
+        feats[f"{sensor}_corr_yz"] = np.corrcoef(y, z)[0, 1]
+    return feats
+
+
+def anova_rank_features(X: pd.DataFrame, y) -> pd.DataFrame:
+    """Ranks features by ANOVA F-statistic.
+
+    F = MSB / MSW. High F means class means are far apart relative to
+    within-class scatter, so the feature separates classes well. Low F
+    (around 1) means the feature carries no discriminative information.
+
+    HAR caveat: windows from the same subject are not independent. Use
+    F only for ranking; do not take p-values at face value.
+
+    Args:
+        X: Feature DataFrame (N rows by F columns). Train set only;
+            the held-out subject must not be present.
+        y: 1D label array of length N.
+
+    Returns:
+        DataFrame with columns ``feature``, ``F``, ``p_value`` sorted by
+        ``F`` descending. Constant (zero-variance) columns yield ``F=NaN``;
+        ``find_highly_correlated`` drops those downstream.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        # sklearn warns when a column has zero variance (UserWarning) and
+        # numpy warns about the resulting 0/0 division (RuntimeWarning).
+        # Both are expected here: the NaN F-score is the signal that
+        # find_highly_correlated uses to drop the column.
+        warnings.filterwarnings("ignore", message="Features .* are constant.")
+        warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+        F, p = f_classif(X.values, y)
+    return (pd.DataFrame({"feature": X.columns, "F": F, "p_value": p})
+              .sort_values("F", ascending=False)
+              .reset_index(drop=True))
+
+
+def correlation_diagnostic(X: pd.DataFrame, threshold: float = 0.9) -> dict:
+    """Computes Pearson and Spearman correlation matrices plus a high-pairs
+    diagnostic table.
+
+    Classifies each highly correlated pair as:
+      - ``linear``               if both ``|r_pearson|`` and ``|r_spearman|``
+        exceed the threshold,
+      - ``monotonic_nonlinear``  if only the Spearman magnitude exceeds it
+        (rank order is preserved but the relationship is not linear),
+      - ``outlier_driven``       if only the Pearson magnitude exceeds it
+        (a few extreme points inflate the linear correlation).
+
+    Pairs with both magnitudes below the threshold are treated as
+    independent and omitted from the diagnostic table.
+
+    Args:
+        X: Feature DataFrame (numeric columns only).
+        threshold: Absolute correlation cutoff for "highly correlated"
+            pairs. Defaults to 0.9.
+
+    Returns:
+        Dict with keys:
+          - ``pearson``    (DataFrame): Pearson correlation matrix.
+          - ``spearman``   (DataFrame): Spearman correlation matrix.
+          - ``high_pairs`` (DataFrame): columns ``a``, ``b``,
+            ``r_pearson``, ``r_spearman``, ``kind``; sorted by the larger
+            of the two absolute correlations, descending. Empty if no
+            pair clears the threshold.
+    """
+    p = X.corr(method="pearson")
+    s = X.corr(method="spearman")
+    cols = list(p.columns)
+    rows = []
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            rp = p.iat[i, j]
+            rs = s.iat[i, j]
+            ap, as_ = abs(rp), abs(rs)
+            if ap <= threshold and as_ <= threshold:
+                continue
+            if ap > threshold and as_ > threshold:
+                kind = "linear"
+            elif as_ > threshold:
+                kind = "monotonic_nonlinear"
+            else:
+                kind = "outlier_driven"
+            rows.append({"a": a, "b": b, "r_pearson": rp,
+                         "r_spearman": rs, "kind": kind})
+    high_pairs = pd.DataFrame(rows)
+    if not high_pairs.empty:
+        high_pairs["abs_max"] = (high_pairs[["r_pearson", "r_spearman"]]
+                                   .abs().max(axis=1))
+        high_pairs = (high_pairs.sort_values("abs_max", ascending=False)
+                                .drop(columns="abs_max")
+                                .reset_index(drop=True))
+    return {"pearson": p, "spearman": s, "high_pairs": high_pairs}
+
+
+def find_highly_correlated(X: pd.DataFrame, anova_ranking: pd.DataFrame,
+                            threshold: float = 0.95) -> list:
+    """Returns the features to drop so that no two surviving features have
+    absolute Pearson correlation above ``threshold``.
+
+    Zero-variance ("constant") features are always dropped: their ANOVA F is
+    undefined (``NaN``), their correlations with every other column are
+    ``NaN``, and they break downstream scalers. For the remaining columns
+    the member of each correlated pair with the lower ANOVA F-score is
+    marked for removal, keeping the better single-feature discriminator.
+    When scores tie, the alphabetically larger name is dropped so the
+    output is deterministic.
+
+    Args:
+        X: Feature DataFrame whose columns will be considered for
+            pruning.
+        anova_ranking: DataFrame produced by ``anova_rank_features``
+            containing at least the columns ``feature`` and ``F``.
+            Features absent from this table are treated as having
+            ``F = 0``.
+        threshold: Absolute Pearson correlation cutoff. Pairs at or
+            below this magnitude are left alone. Defaults to 0.95.
+
+    Returns:
+        Sorted list of feature names to drop from ``X``. Applying
+        ``X.drop(columns=result)`` leaves only the highest-F member of
+        each correlated cluster and removes any constant columns.
+    """
+    f_score = dict(zip(anova_ranking["feature"], anova_ranking["F"]))
+    corr = X.corr().abs()
+    cols = list(corr.columns)
+    drop = {c for c in cols if not np.isfinite(f_score.get(c, 0.0))}
+    for i, a in enumerate(cols):
+        if a in drop:
+            continue
+        for j in range(i + 1, len(cols)):
+            b = cols[j]
+            if b in drop:
+                continue
+            r = corr.iat[i, j]
+            if not np.isfinite(r) or r <= threshold:
+                continue
+            fa = f_score.get(a, 0.0)
+            fb = f_score.get(b, 0.0)
+            if fa > fb:
+                drop.add(b)
+            elif fb > fa:
+                drop.add(a)
+            else:
+                drop.add(max(a, b))
+    return sorted(drop)
+
+
+def evaluate_classifier(y_true, y_pred) -> dict:
+    """Computes a standard classifier metrics dictionary.
+
+    Reports both weighted and macro F1: the weighted variant tracks
+    overall hit rate when classes are imbalanced, while the macro
+    variant gives every class the same weight and surfaces minority-
+    class failures.
+
+    Args:
+        y_true: Ground-truth labels (1D array-like).
+        y_pred: Predicted labels (1D array-like).
+
+    Returns:
+        Dict with keys ``accuracy``, ``precision``, ``recall``,
+        ``f1_weighted``, and ``f1_macro``. Precision and recall use
+        weighted averaging. All metrics use ``zero_division=0`` so
+        absent classes contribute zero rather than raising.
+    """
+    return {
+        "accuracy":    accuracy_score(y_true, y_pred),
+        "precision":   precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall":      recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1_macro":    f1_score(y_true, y_pred, average="macro",    zero_division=0),
+    }
+
+
+def build_preprocessor(columns: Iterable[str]) -> ColumnTransformer:
+    """Sensor-grouped ColumnTransformer for engineered tabular features.
+
+    Accelerometer-derived columns (names starting with ``acc_``) are scaled
+    with :class:`StandardScaler` since acc magnitudes are close to Gaussian
+    after gravity removal. Gyroscope-derived columns (``gyr_``) use
+    :class:`RobustScaler` to absorb the heavy tails from quick wrist
+    motions. Any remaining columns (cross-channel features such as
+    ``acc_sma``, ``gyr_vm_mean``, etc.) are scaled with
+    :class:`StandardScaler`.
+
+    The returned transformer is meant to be the first step of a
+    :class:`Pipeline` so that it is refit on every cross-validation fold
+    and no held-out statistics leak into the training set.
+
+    Args:
+        columns: Iterable of column names in the order they appear in the
+            feature matrix passed downstream.
+
+    Returns:
+        A :class:`ColumnTransformer` ready to be the first step of a
+        :class:`Pipeline`.
+    """
+    cols = list(columns)
+    acc_cols   = [c for c in cols if c.startswith("acc_")]
+    gyr_cols   = [c for c in cols if c.startswith("gyr_")]
+    other_cols = [c for c in cols if c not in acc_cols + gyr_cols]
+    parts = [
+        ("acc", StandardScaler(), acc_cols),
+        ("gyr", RobustScaler(),   gyr_cols),
+    ]
+    if other_cols:
+        parts.append(("other", StandardScaler(), other_cols))
+    return ColumnTransformer(parts)
+
+
+def scale_and_flatten_windows(
+    train_mask: np.ndarray,
+    test_mask: np.ndarray,
+    windows: Iterable[pd.DataFrame],
+    feature_cols: Tuple[str, ...] = SIX_AXES,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sensor-grouped scaling for raw 6-axis windows, returned as flat matrices.
+
+    Stacks the per-window DataFrames into a 3D array of shape
+    ``(n_windows, n_timesteps, n_axes)``, splits by the boolean masks, flattens
+    each side into ``(n_windows * n_timesteps, n_axes)`` so timesteps act as
+    extra rows, fits :func:`build_preprocessor` on the train rows only, applies
+    the fitted scaler to the test rows, then reshapes back to a flat 2D matrix
+    of shape ``(n_windows, n_timesteps * n_axes)`` ready to feed classical ML
+    estimators that expect 2D input.
+
+    Reuses :func:`build_preprocessor` so the time-series pipeline and the
+    engineered-feature pipeline share a single source of truth for sensor-grouped
+    scaling (StandardScaler on ``acc_*``, RobustScaler on ``gyr_*``).
+
+    Args:
+        train_mask: Boolean array of length ``n_windows`` selecting training
+            windows (e.g. ``data["train_mask"]`` from ``segmented.pkl``).
+        test_mask: Boolean array of length ``n_windows`` selecting test windows.
+        windows: Iterable of per-window DataFrames; each must contain
+            ``feature_cols`` and have the same number of rows.
+        feature_cols: Channel ordering to extract from each window. Defaults to
+            :data:`SIX_AXES`.
+
+    Returns:
+        Tuple ``(train_set, test_set)`` of float ``ndarray`` with shapes
+        ``(train_mask.sum(), n_timesteps * len(feature_cols))`` and
+        ``(test_mask.sum(), n_timesteps * len(feature_cols))``.
+
+    Notes:
+        Previously named ``MixedScaling``. The old name is kept as a module-level
+        alias so existing notebooks continue to import it.
+    """
+    feature_cols = list(feature_cols)
+
+    Unfold3D = np.array([win[feature_cols].values for win in windows])
+    _, n_timesteps, n_features = Unfold3D.shape
+
+    X_train_3d = Unfold3D[train_mask]
+    X_test_3d = Unfold3D[test_mask]
+
+    X_train_2d = X_train_3d.reshape(-1, n_features)
+    X_test_2d = X_test_3d.reshape(-1, n_features)
+
+    X_train_df = pd.DataFrame(X_train_2d, columns=feature_cols)
+    X_test_df = pd.DataFrame(X_test_2d, columns=feature_cols)
+
+    scaler = build_preprocessor(X_train_df.columns)
+
+    X_train_2d_scaled = scaler.fit_transform(X_train_df)
+    X_test_2d_scaled = scaler.transform(X_test_df)
+
+    train_set = X_train_2d_scaled.reshape(X_train_3d.shape[0], n_timesteps * n_features)
+    test_set = X_test_2d_scaled.reshape(X_test_3d.shape[0], n_timesteps * n_features)
+
+    print(f"Train set ready with shape: {train_set.shape}")
+    print(f"Test set ready with shape:  {test_set.shape}")
+
+    return train_set, test_set
+
+
+# Back-compat alias. Original name from the first time-series notebook draft;
+# kept so existing call sites (e.g. utils.MixedScaling) keep resolving.
+MixedScaling = scale_and_flatten_windows
+
+
+# Per-model parameter-grid keys under ``cfg["fine_tune"]``. The ``clf__``
+# prefix on each grid entry matches the Pipeline step that wraps the
+# classifier.
+_FEATURE_GRID_KEYS: Dict[str, str] = {
+    "svm-rbf":             "param_grid_svm",
+    "randomforest":        "param_grid_rf",
+    "gradient-boosting":   "param_grid_gbt",
+    "logistic-regression": "param_grid_lr",
+}
+
+
+def _make_feature_classifier(model_name: str, cfg: dict):
+    """Instantiate one of the four classifiers used by the FE pipeline.
+
+    Reads optional per-model overrides from ``cfg["fine_tune"]["base_params"]``
+    and merges them into the constructor kwargs, so deployment-specific knobs
+    (e.g. LogisticRegression ``max_iter=3000`` / ``solver="saga"`` for the
+    time-series pipeline) live in config instead of source.
+    """
+    rs = int(cfg.get("random_state", 42))
+    overrides = dict(cfg.get("fine_tune", {}).get("base_params", {}).get(model_name, {}))
+    if model_name == "svm-rbf":
+        kwargs = {"class_weight": "balanced", "random_state": rs, **overrides}
+        return SVC(**kwargs)
+    if model_name == "randomforest":
+        kwargs = {"class_weight": "balanced", "n_jobs": -1, "random_state": rs, **overrides}
+        return RandomForestClassifier(**kwargs)
+    if model_name == "gradient-boosting":
+        kwargs = {"random_state": rs, **overrides}
+        return HistGradientBoostingClassifier(**kwargs)
+    if model_name == "logistic-regression":
+        kwargs = {"max_iter": 1000, "random_state": rs, **overrides}
+        return LogisticRegression(**kwargs)
+    raise ValueError(
+        f"Unknown model_name={model_name!r}. Expected one of "
+        "'svm-rbf', 'randomforest', 'gradient-boosting', "
+        "'logistic-regression'."
+    )
+
+
+def _resolve_feature_param_grid(model_name: str, cfg: dict) -> Dict[str, list]:
+    """Look up the parameter grid for ``model_name`` in ``cfg["fine_tune"]``.
+
+    All four classifiers read their grids from config (keys
+    ``param_grid_svm``, ``param_grid_rf``, ``param_grid_gbt``,
+    ``param_grid_lr``) so a single edit to ``config.yml`` rolls through
+    every notebook that calls :func:`tune_feature_classifier`.
+    """
+    ft = cfg.get("fine_tune", {})
+    try:
+        key = _FEATURE_GRID_KEYS[model_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown model_name={model_name!r}. Expected one of "
+            f"{sorted(_FEATURE_GRID_KEYS)}."
+        ) from exc
+    return dict(ft[key])
+
+
+# Default classifier shortlist for the time-series modeling notebook.
+# Kept at module scope so back-compat callers (e.g. utils.TrainAllMLs) can
+# resolve a sensible default without threading the list through every call.
+model_names = ["svm-rbf", "randomforest", "gradient-boosting", "logistic-regression"]
+
+
+def train_classifiers(
+    model_names: Iterable[str],
+    train_set: np.ndarray,
+    train_labels: np.ndarray,
+    test_set: np.ndarray,
+    cfg: dict,
+) -> Tuple[list, list]:
+    """Fit a shortlist of classifiers on one training set and predict on a test set.
+
+    Iterates over ``model_names``, builds each estimator with
+    :func:`_make_feature_classifier` (so per-model overrides from
+    ``cfg["fine_tune"]["base_params"]`` are honoured), fits it on
+    ``(train_set, train_labels)``, and collects the test-set predictions.
+
+    Args:
+        model_names: Iterable of classifier identifiers. Each must be one of
+            ``"svm-rbf"``, ``"randomforest"``, ``"gradient-boosting"``,
+            ``"logistic-regression"``.
+        train_set: 2D float array of shape ``(n_train, n_features)``.
+        train_labels: 1D label array of length ``n_train``.
+        test_set: 2D float array of shape ``(n_test, n_features)`` with the
+            same column count as ``train_set``.
+        cfg: Loaded configuration dictionary. Forwarded to
+            :func:`_make_feature_classifier` for ``random_state`` and the
+            optional ``fine_tune.base_params`` block.
+
+    Returns:
+        Tuple ``(trained_models, predictions)`` of parallel lists, both
+        indexed in the same order as ``model_names``. ``predictions[i]`` is
+        the array of predicted labels for the test set from
+        ``trained_models[i]``.
+
+    Notes:
+        Previously named ``TrainAllMLs``. The old name is kept as a thin
+        module-level wrapper so existing notebooks continue to call
+        ``utils.TrainAllMLs(...)`` against the default ``model_names`` list.
+    """
+    trained_models = []
+    predictions = []
+    for i in model_names:
+        model = _make_feature_classifier(i, cfg)
+        model.fit(train_set, train_labels)
+        y_pred = model.predict(test_set)
+        trained_models.append(model)
+        predictions.append(y_pred)
+    return trained_models, predictions
+
+
+# Back-compat alias. Original signature took no ``model_names`` argument and
+# used the module-level constant of the same name; preserved here so existing
+# notebooks keep working without edits.
+def TrainAllMLs(train_set, train_labels, test_set, cfg):
+    return train_classifiers(model_names, train_set, train_labels, test_set, cfg)
+
+
+def tune_feature_classifier(
+    model_name: str,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    cfg: dict,
+) -> Tuple[Pipeline, Dict[str, Any], float]:
+    """Subject-aware grid search for one classifier on engineered features.
+
+    Builds a :class:`Pipeline` whose first step is the sensor-grouped
+    :class:`ColumnTransformer` from :func:`build_preprocessor`, so the
+    scaler is refit on every cross-validation fold. Runs
+    :class:`GridSearchCV` with
+    ``GroupKFold(n_splits=cfg["fine_tune"]["cv"])`` and passes
+    ``groups=groups_train`` so the two training subjects are split across
+    the folds (one subject per fold) and no subject appears on both sides
+    of a fold. The held-out evaluation subject is never seen by the grid
+    search.
+
+    Args:
+        model_name: One of ``"svm-rbf"``, ``"randomforest"``,
+            ``"gradient-boosting"``, ``"logistic-regression"``.
+        X_train: Feature matrix for the training subjects. Column names
+            are used by :func:`build_preprocessor` to assign each column
+            to its sensor group.
+        y_train: Training labels.
+        groups_train: Subject identifier per training window. Must
+            contain at least ``cfg["fine_tune"]["cv"]`` distinct values.
+        cfg: Loaded configuration dictionary. Reads ``random_state``,
+            ``fine_tune.cv``, ``fine_tune.verbose``,
+            ``fine_tune.param_grid_svm``, ``fine_tune.param_grid_rf``.
+
+    Returns:
+        Tuple of ``(best_pipeline, best_params, best_cv_f1_macro)``.
+
+    Raises:
+        ValueError: If ``model_name`` is not recognized or if
+            ``groups_train`` has fewer than ``cfg.fine_tune.cv``
+            distinct subjects.
+
+    Notes:
+        Previously named ``Fine_tuning``. The old name is kept as a
+        module-level alias so existing notebooks continue to resolve it.
+    """
+    n_splits = int(cfg.get("fine_tune", {}).get("cv", 2))
+    n_groups = int(np.unique(groups_train).size)
+    if n_groups < n_splits:
+        raise ValueError(
+            f"Need at least {n_splits} distinct subjects for "
+            f"GroupKFold(n_splits={n_splits}); got {n_groups}."
+        )
+
+    pre = build_preprocessor(X_train.columns)
+    clf = _make_feature_classifier(model_name, cfg)
+    pipe = Pipeline(steps=[("pre", pre), ("clf", clf)])
+    grid = _resolve_feature_param_grid(model_name, cfg)
+
+    gs = GridSearchCV(
+        estimator=pipe,
+        param_grid=grid,
+        cv=GroupKFold(n_splits=n_splits),
+        scoring="f1_macro",
+        n_jobs=-1,
+        refit=True,
+        verbose=int(cfg.get("fine_tune", {}).get("verbose", 0)),
+    )
+    gs.fit(X_train, y_train, groups=groups_train)
+
+    return gs.best_estimator_, dict(gs.best_params_), float(gs.best_score_)
+
+
+# Back-compat alias. Original name from the first time-series notebook draft;
+# kept so existing call sites (e.g. utils.Fine_tuning) keep resolving.
+Fine_tuning = tune_feature_classifier
