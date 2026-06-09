@@ -446,11 +446,23 @@ def plot_classifier_evaluation(model_name, test_labels, y_pred, classes, cmap="B
         print(f"    - False Negatives (FN): {fn}  (actual '{class_name}' that was missed)")
         print(f"    - True Negatives  (TN): {tn}  (correct rejection of unrelated gestures)\n")
 
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots(figsize=(8.5, 8))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
-    disp.plot(cmap=cmap, values_format="d", ax=ax, colorbar=False)
+    # Pass xticks_rotation straight to the display: this applies the rotation
+    # reliably. Calling ax.set_xticklabels(ax.get_xticklabels(), ...) afterwards
+    # is fragile because the tick labels are not populated until the figure is
+    # drawn, so it can silently leave the labels horizontal and overlapping.
+    disp.plot(cmap=cmap, values_format="d", ax=ax, colorbar=False,
+              xticks_rotation=45)
 
     ax.set_title(f"Confusion Matrix - {model_name}")
+    # Match the readable style of the per-class F1 heatmap: 45-degree,
+    # right-aligned predicted-axis labels so the long 9-class names fit.
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+    ax.tick_params(axis="both", labelsize=9)
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
     plt.tight_layout()
     plt.show()
 
