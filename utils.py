@@ -98,6 +98,43 @@ def session_key(meta: dict) -> tuple:
             meta["hand"], meta["primary"], meta["user"])
 
 
+def gesture_label(gesture_id: str, finger: str) -> str:
+    """Builds the fine-grained class label from a gesture and its finger.
+
+    The four directional gestures (``scroll-up``, ``scroll-down``,
+    ``swipe-left``, ``swipe-right``) were each recorded with both the thumb
+    and the index finger, and the two produce measurably different IMU
+    signatures, so they are kept as separate classes ``{gesture_id}_{finger}``
+    (e.g. ``scroll-up_thumb``). Texting carries no finger distinction
+    (``finger == "na"``) and stays a single class. Applied across the dataset
+    this yields the 9 recognizer classes:
+    ``scroll-up_thumb``, ``scroll-up_index``, ``scroll-down_thumb``,
+    ``scroll-down_index``, ``swipe-left_thumb``, ``swipe-left_index``,
+    ``swipe-right_thumb``, ``swipe-right_index``, ``texting``.
+
+    This is the single source of truth for the prediction-target grammar; any
+    pipeline that builds modeling labels must route through it so the class
+    set stays consistent across notebooks.
+
+    Args:
+        gesture_id: One of the 5 base gestures (see ``VALID_BASES``).
+        finger: ``"thumb"``, ``"index"``, or ``"na"`` (texting).
+
+    Returns:
+        ``"{gesture_id}_{finger}"`` for the directional gestures, or
+        ``gesture_id`` unchanged when ``finger == "na"``.
+
+    Example:
+        >>> gesture_label("swipe-left", "index")
+        'swipe-left_index'
+        >>> gesture_label("texting", "na")
+        'texting'
+    """
+    if finger == "na":
+        return gesture_id
+    return f"{gesture_id}_{finger}"
+
+
 def discover_csvs(data_root) -> list:
     """Returns every CSV under data_root, recursively, sorted."""
     return sorted(Path(data_root).rglob("*.csv"))
