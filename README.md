@@ -255,10 +255,10 @@ outputs/
 | Role | Person |
 |---|---|
 | Data collection (subject `a`) | Alexandros - [@Alejandro-Giann](https://github.com/Alejandro-Giann) |
-| Data collection (subject `b`) | Vasilis - [@IBilba](https://github.com/IBilba) |
+| Data collection (subject `b`) | Vasilis - [@vasilisbit](https://github.com/vasilisbit) |
 | Data collection (subject `s`) | Stamatia - [@StamyKal](https://github.com/StamyKal) |
 | Dataset-creation notebook (`aiot_dataset_creation_sample.ipynb`) | Alexandros, Vasilis, Stamatia |
 | EDA and segmentation notebook (`aiot_project_eda_segmentation.ipynb`) | Alexandros - [@Alejandro-Giann](https://github.com/Alejandro-Giann) |
 | Time-series modelling notebook (`aiot_project_time_series.ipynb`) | Stamatia - [@StamyKal](https://github.com/StamyKal) |
-| Feature-engineering notebook (`aiot_project_feature_engineering.ipynb`) | Vasilis - [@IBilba](https://github.com/IBilba) |
+| Feature-engineering notebook (`aiot_project_feature_engineering.ipynb`) | Vasilis - [@vasilisbit](https://github.com/vasilisbit) |
 | Shared utilities (`utils.py`, `utils_visual.py`) and project setup | Alexandros, Vasilis, Stamatia |
